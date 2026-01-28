@@ -16,8 +16,8 @@ from telegram.ext import (
 )
 
 # ================== CONFIG ==================
-BOT_TOKEN = os.getenv("8277048146:AAFSmDLMbhDCWLJWVDcJHYMH2yg3_qL4crc")
-ADMIN_ID = int(os.getenv("8277048146"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 PROOF_CHANNEL_ID = int(os.getenv("PROOF_CHANNEL_ID"))
 
 PORT = int(os.environ.get("PORT", 10000))
