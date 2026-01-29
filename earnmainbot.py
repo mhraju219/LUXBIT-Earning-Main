@@ -24,7 +24,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
 PORT = int(os.environ.get("PORT", 10000))
 
-ADMIN_ID = 8277048146  # 🔴 YOUR TELEGRAM ID
+ADMIN_ID = 7742465131  # 🔴 YOUR TELEGRAM ID
 PROOF_CHANNEL = "https://t.me/your_proof_channel"
 
 TASK_REWARD = 0.10
