@@ -1,6 +1,6 @@
 import os
 import threading
-import psycopg2
+import psycopg
 from flask import Flask
 from telegram import (
     Update,
