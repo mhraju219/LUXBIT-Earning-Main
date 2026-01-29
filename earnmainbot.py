@@ -25,7 +25,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 PORT = int(os.environ.get("PORT", 10000))
 
 ADMIN_ID = 8277048146  # 🔴 YOUR TELEGRAM ID
-PROOF_CHANNEL = "https://t.me/your_proof_channel"
+PROOF_CHANNEL = "https://t.me/lbxRewards"
 
 TASK_REWARD = 0.10
 REF_REWARD = 0.50
@@ -165,7 +165,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "❓ Help":
-        await update.message.reply_text("Admin: @YourAdminUsername")
+        await update.message.reply_text("Admin: @lbxRewards")
         return
 
     # ===== USER INPUT STATES =====
