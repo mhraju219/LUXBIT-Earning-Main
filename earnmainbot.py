@@ -1,5 +1,14 @@
-import os import logging import sqlite3 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler try: from binance.client import Client except ImportError: Client = None
+import os
+import logging
+import sqlite3
 
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+
+try:
+    from binance.client import Client
+except ImportError:
+    Client = None
 ==============================
 
 Environment Variables
