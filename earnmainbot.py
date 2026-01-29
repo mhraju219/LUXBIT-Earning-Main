@@ -30,9 +30,9 @@ TASK_RESET_TIME = timedelta(hours=1)
 
 # Task definitions
 TASKS = {
-    "watch": {"name": "🎥 Watch Video", "url": "https://example.com/video", "wait": timedelta(minutes=10)},
-    "visit": {"name": "🌐 Visit Website", "url": "https://example.com/website", "wait": timedelta(minutes=3)},
-    "airdrop": {"name": "🪂 Claim Airdrop", "url": "https://example.com/airdrop", "wait": timedelta(minutes=5)},
+    "watch": {"name": "🎥 Watch Video", "url": "https://example.com/video", "secret": "MYSECRET123"},
+    "visit": {"name": "🌐 Visit Website", "url": "https://example.com/website", "secret": None},
+    "airdrop": {"name": "🪂 Claim Airdrop", "url": "https://example.com/airdrop", "secret": None},
 }
 
 # ================= FLASK HEALTH CHECK =================
@@ -107,11 +107,14 @@ def start_ad(uid, task):
     conn.commit()
 
 def can_claim_ad(uid, task):
+    if TASKS[task]["secret"]:
+        # Claim by secret code
+        return False
     cur.execute("SELECT ad_started_at FROM tasks WHERE user_id=%s AND task=%s", (uid, task))
     row = cur.fetchone()
     if not row or not row[0]:
         return False
-    return datetime.utcnow() - row[0] >= TASKS[task]["wait"]
+    return True  # user can click Claim Reward for normal tasks
 
 def complete_task(uid, task):
     cur.execute("UPDATE tasks SET completed_at=%s WHERE user_id=%s AND task=%s", (datetime.utcnow(), uid, task))
@@ -144,6 +147,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text
 
+    # 1️⃣ Show tasks inline buttons
     if text in ["💰 Earn Crypto", "📋 Tasks"]:
         await update.message.reply_text(
             "Choose a task:",
@@ -155,23 +159,53 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # 2️⃣ Show balance
     if text == "📊 My Balance":
         await update.message.reply_text(f"💰 Balance: {balance(uid):.2f} USD")
         return
 
+    # 3️⃣ Refer & Earn
     if text == "👥 Refer & Earn":
         await update.message.reply_text(
             f"Earn {REF_REWARD} USD per referral\n\nhttps://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}"
         )
         return
 
+    # 4️⃣ Proof Payment
     if text == "🧾 Proof Payment":
         await update.message.reply_text("https://t.me/your_proof_channel")
         return
 
+    # 5️⃣ Help
     if text == "❓ Help":
         await update.message.reply_text("Admin: @YourAdminUsername")
         return
+
+    # 6️⃣ Secret code submission
+    for task, data in TASKS.items():
+        if data.get("secret") and text == data["secret"]:
+            if not can_do_task(uid, task):
+                await update.message.reply_text("⏳ Task already claimed or still on cooldown.")
+                return
+            complete_task(uid, task)
+
+            # Referral
+            ref = referral_info(uid)
+            if ref:
+                referred_by, paid = ref
+                if referred_by and not paid:
+                    cur.execute("SELECT user_id FROM users WHERE ref_code=%s", (referred_by,))
+                    r = cur.fetchone()
+                    if r:
+                        add_balance(r[0], REF_REWARD)
+                        mark_ref_paid(uid)
+
+            await update.message.reply_text(f"✅ Task '{data['name']}' completed!\n+{TASK_REWARD} USD added")
+            return
+
+    # If invalid code
+    if any(data.get("secret") for data in TASKS.values()):
+        await update.message.reply_text("❌ Invalid secret code. Please try again.")
 
 # ================= TASK CALLBACK =================
 async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,13 +221,21 @@ async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     start_ad(uid, task)
 
-    await q.edit_message_text(
-        f"{TASKS[task]['name']} started 👇\nComplete the task, then click Claim Reward",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"🔗 Open {TASKS[task]['name']}", url=TASKS[task]["url"])],
-            [InlineKeyboardButton("✅ Claim Reward", callback_data=f"claim_{task}")]
-        ])
-    )
+    if TASKS[task]["secret"]:
+        await q.edit_message_text(
+            f"{TASKS[task]['name']} started 👇\n"
+            f"Watch this video: {TASKS[task]['url']}\n\n"
+            "After watching, send me the secret code from the video to claim your reward."
+        )
+    else:
+        await q.edit_message_text(
+            f"{TASKS[task]['name']} started 👇\n"
+            f"Open link: {TASKS[task]['url']}\n\n"
+            "Then click Claim Reward",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Claim Reward", callback_data=f"claim_{task}")]
+            ])
+        )
 
 # ================= CLAIM CALLBACK =================
 async def claim_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -203,12 +245,17 @@ async def claim_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[DEBUG] Claim clicked: {task}")
     await q.answer()
 
-    if not can_claim_ad(uid, task):
-        await q.edit_message_text("⏳ Please wait for the task ad to finish.")
+    if TASKS[task]["secret"]:
+        await q.edit_message_text("❌ This task requires submitting a secret code from the video.")
+        return
+
+    if not can_do_task(uid, task):
+        await q.edit_message_text("⏳ Task already claimed or still on cooldown.")
         return
 
     complete_task(uid, task)
 
+    # Referral
     ref = referral_info(uid)
     if ref:
         referred_by, paid = ref
@@ -219,7 +266,7 @@ async def claim_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_balance(r[0], REF_REWARD)
                 mark_ref_paid(uid)
 
-    await q.edit_message_text(f"✅ {TASKS[task]['name']} completed!\n+{TASK_REWARD} USD added")
+    await q.edit_message_text(f"✅ Task '{TASKS[task]['name']}' completed!\n+{TASK_REWARD} USD added")
 
 # ================= ERROR HANDLER =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
