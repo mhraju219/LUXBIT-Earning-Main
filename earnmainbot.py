@@ -1,94 +1,200 @@
 import os
 import threading
+import psycopg2
 from flask import Flask
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes,
+)
 
+# ---------------- CONFIG ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 10000))  # Render port
+DATABASE_URL = os.environ.get("DATABASE_URL")
+PORT = int(os.environ.get("PORT", 10000))
 
-# ---------------- Flask server for Render port ----------------
+TASK_REWARD = 0.10
+REF_REWARD = 0.50
+
+# ---------------- Flask (Render Port Fix) ----------------
 app_flask = Flask(__name__)
 
 @app_flask.route("/")
 def home():
-    return "Bot is running with keyboard menu + tasks submenu!"
+    return "Bot is running!"
 
-def run_flask():
-    app_flask.run(host="0.0.0.0", port=PORT)
+threading.Thread(
+    target=lambda: app_flask.run(host="0.0.0.0", port=PORT),
+    daemon=True
+).start()
 
-flask_thread = threading.Thread(target=run_flask)
-flask_thread.start()
+# ---------------- PostgreSQL ----------------
+conn = psycopg2.connect(DATABASE_URL)
+cur = conn.cursor()
 
-# ---------------- Telegram Bot ----------------
-# Main keyboard menu
-keyboard = [
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id BIGINT PRIMARY KEY,
+    balance NUMERIC DEFAULT 0,
+    ref_code TEXT UNIQUE,
+    referred_by TEXT
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS tasks (
+    user_id BIGINT,
+    task TEXT,
+    UNIQUE(user_id, task)
+)
+""")
+
+conn.commit()
+
+# ---------------- Helpers ----------------
+def generate_ref_code(user_id):
+    return f"REF{user_id}"
+
+def add_user(user_id, referred_by=None):
+    cur.execute(
+        """
+        INSERT INTO users (user_id, ref_code, referred_by)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (user_id) DO NOTHING
+        """,
+        (user_id, generate_ref_code(user_id), referred_by)
+    )
+    conn.commit()
+
+def add_balance(user_id, amount):
+    cur.execute(
+        "UPDATE users SET balance = balance + %s WHERE user_id=%s",
+        (amount, user_id)
+    )
+    conn.commit()
+
+def get_balance(user_id):
+    cur.execute("SELECT balance FROM users WHERE user_id=%s", (user_id,))
+    return cur.fetchone()[0]
+
+def task_done(user_id, task):
+    cur.execute(
+        "SELECT 1 FROM tasks WHERE user_id=%s AND task=%s",
+        (user_id, task)
+    )
+    return cur.fetchone() is not None
+
+def complete_task(user_id, task):
+    cur.execute(
+        "INSERT INTO tasks (user_id, task) VALUES (%s, %s)",
+        (user_id, task)
+    )
+    add_balance(user_id, TASK_REWARD)
+    conn.commit()
+
+# ---------------- Keyboard Menu ----------------
+menu = ReplyKeyboardMarkup([
     ["💰 Earn Crypto", "📋 Tasks"],
     ["👥 Refer & Earn", "💸 Withdraw"],
     ["📊 My Balance", "🧾 Proof Payment"],
     ["❓ Help"]
-]
-reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+], resize_keyboard=True)
 
-# /start command
+# ---------------- Commands ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    args = context.args
+
+    referred_by = None
+    if args:
+        referred_by = args[0]
+        cur.execute("SELECT user_id FROM users WHERE ref_code=%s", (referred_by,))
+        ref_user = cur.fetchone()
+        if ref_user:
+            add_balance(ref_user[0], REF_REWARD)
+
+    add_user(user_id, referred_by)
+
     await update.message.reply_text(
-        "Welcome! Choose an option from the menu below:",
-        reply_markup=reply_markup
+        "Welcome! Use the menu below 👇",
+        reply_markup=menu
     )
 
-# Handle keyboard messages
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------------- Messages ----------------
+async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     text = update.message.text
 
     if text == "📋 Tasks":
-        # Show inline buttons for tasks
-        task_keyboard = [
-            [InlineKeyboardButton("🎥 Watch Video", callback_data="watch_video")],
-            [InlineKeyboardButton("📝 Complete Survey", callback_data="survey")],
-            [InlineKeyboardButton("🌐 Visit Website", callback_data="visit_website")]
+        buttons = [
+            [InlineKeyboardButton("🎥 Watch Video", callback_data="watch")],
+            [InlineKeyboardButton("📝 Survey", callback_data="survey")],
+            [InlineKeyboardButton("🌐 Visit Website", callback_data="visit")]
         ]
-        reply_markup_inline = InlineKeyboardMarkup(task_keyboard)
-        await update.message.reply_text("📋 Choose a task:", reply_markup=reply_markup_inline)
+        await update.message.reply_text(
+            "Choose a task:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
 
-    else:
-        # Other main menu options
-        responses = {
-            "💰 Earn Crypto": "💰 Earn Crypto:\nComplete tasks and earn crypto daily!",
-            "👥 Refer & Earn": "👥 Refer & Earn:\nShare your referral link and earn rewards!",
-            "💸 Withdraw": "💸 Withdraw:\nClick here to withdraw your balance to your wallet.",
-            "📊 My Balance": "📊 My Balance:\nYour current balance is: 0.0 Crypto",
-            "🧾 Proof Payment": "🧾 Proof Payment:\nCheck our proof payments here:\nhttps://t.me/your_payment_proof_channel",
-            "❓ Help": "❓ Help:\nIf you face any issue, contact admin: @YourAdminUsername"
-        }
-        await update.message.reply_text(responses.get(text, "Please choose an option from the menu."), reply_markup=reply_markup)
+    if text == "📊 My Balance":
+        bal = get_balance(user_id)
+        await update.message.reply_text(f"💰 Balance: {bal:.2f} USD")
+        return
 
-# Handle inline button clicks
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if text == "👥 Refer & Earn":
+        await update.message.reply_text(
+            f"Invite friends & earn {REF_REWARD} USD\n\n"
+            f"https://t.me/YOUR_BOT_USERNAME?start={generate_ref_code(user_id)}"
+        )
+        return
+
+    if text == "🧾 Proof Payment":
+        await update.message.reply_text(
+            "Proof channel:\nhttps://t.me/your_payment_proof_channel"
+        )
+        return
+
+    await update.message.reply_text("Use menu 👇", reply_markup=menu)
+
+# ---------------- Task Buttons ----------------
+async def task_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user_id = query.from_user.id
+    task = query.data
     await query.answer()
 
-    if query.data == "watch_video":
-        # Show an advertising link
-        await query.edit_message_text(
-            "🎥 Watch this video ad to earn rewards:\nhttps://example.com/ad_video"
-        )
-    elif query.data == "survey":
-        await query.edit_message_text(
-            "📝 Complete this survey:\nhttps://example.com/survey"
-        )
-    elif query.data == "visit_website":
-        await query.edit_message_text(
-            "🌐 Visit this website:\nhttps://example.com/visit"
-        )
-    else:
-        await query.edit_message_text("Unknown option!")
+    if task_done(user_id, task):
+        await query.edit_message_text("❌ Task already completed.")
+        return
 
-# ---------------- Run Bot ----------------
+    complete_task(user_id, task)
+
+    links = {
+        "watch": "🎥 Watch:\nhttps://example.com/video",
+        "survey": "📝 Survey:\nhttps://example.com/survey",
+        "visit": "🌐 Visit:\nhttps://example.com/site",
+    }
+
+    await query.edit_message_text(
+        f"✅ Task completed!\n"
+        f"+{TASK_REWARD} USD added\n\n{links[task]}"
+    )
+
+# ---------------- Run ----------------
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    print("Bot is running with keyboard + tasks submenu + Flask server...")
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
+    app.add_handler(CallbackQueryHandler(task_handler))
+    print("Bot running with PostgreSQL")
     app.run_polling()
