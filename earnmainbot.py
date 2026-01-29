@@ -28,36 +28,21 @@ TASK_REWARD = 0.10
 REF_REWARD = 0.50
 TASK_RESET_TIME = timedelta(hours=1)
 
-# Task definitions
 TASKS = {
-    "watch": {
-        "name": "🎥 Watch Video",
-        "url": "https://example.com/video",
-        "wait": timedelta(minutes=10),
-    },
-    "visit": {
-        "name": "🌐 Visit Website",
-        "url": "https://example.com/website",
-        "wait": timedelta(minutes=3),
-    },
-    "airdrop": {
-        "name": "🪂 Claim Airdrop",
-        "url": "https://example.com/airdrop",
-        "wait": timedelta(minutes=5),
-    }
+    "watch": {"name": "🎥 Watch Video", "url": "https://example.com/video", "wait": timedelta(minutes=10)},
+    "visit": {"name": "🌐 Visit Website", "url": "https://example.com/website", "wait": timedelta(minutes=3)},
+    "airdrop": {"name": "🪂 Claim Airdrop", "url": "https://example.com/airdrop", "wait": timedelta(minutes=5)},
 }
 
-# ================= FLASK (PORT FIX) =================
+# ================= FLASK HEALTH CHECK =================
 app_flask = Flask(__name__)
 
 @app_flask.route("/")
 def home():
-    return "Bot running"
+    return "Bot is running"
 
-threading.Thread(
-    target=lambda: app_flask.run(host="0.0.0.0", port=PORT),
-    daemon=True
-).start()
+# Run Flask in a separate thread just for Render health check
+threading.Thread(target=lambda: app_flask.run(host="0.0.0.0", port=PORT), daemon=True).start()
 
 # ================= DATABASE =================
 conn = psycopg.connect(DATABASE_URL)
@@ -82,12 +67,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     UNIQUE(user_id, task)
 )
 """)
-
 conn.commit()
 
 # ================= HELPERS =================
-def ref_code(uid):
-    return f"REF{uid}"
+def ref_code(uid): return f"REF{uid}"
 
 def add_user(uid, referred_by=None):
     cur.execute("""
@@ -98,10 +81,7 @@ def add_user(uid, referred_by=None):
     conn.commit()
 
 def add_balance(uid, amount):
-    cur.execute(
-        "UPDATE users SET balance = balance + %s WHERE user_id=%s",
-        (amount, uid)
-    )
+    cur.execute("UPDATE users SET balance = balance + %s WHERE user_id=%s", (amount, uid))
     conn.commit()
 
 def balance(uid):
@@ -114,14 +94,9 @@ def balance(uid):
         return 0.0
 
 def can_do_task(uid, task):
-    cur.execute(
-        "SELECT completed_at FROM tasks WHERE user_id=%s AND task=%s",
-        (uid, task)
-    )
+    cur.execute("SELECT completed_at FROM tasks WHERE user_id=%s AND task=%s", (uid, task))
     row = cur.fetchone()
-    if not row or not row[0]:
-        return True
-    return datetime.utcnow() - row[0] >= TASK_RESET_TIME
+    return True if not row or not row[0] else datetime.utcnow() - row[0] >= TASK_RESET_TIME
 
 def start_ad(uid, task):
     cur.execute("""
@@ -133,45 +108,26 @@ def start_ad(uid, task):
     conn.commit()
 
 def can_claim_ad(uid, task):
-    cur.execute(
-        "SELECT ad_started_at FROM tasks WHERE user_id=%s AND task=%s",
-        (uid, task)
-    )
+    cur.execute("SELECT ad_started_at FROM tasks WHERE user_id=%s AND task=%s", (uid, task))
     row = cur.fetchone()
-    if not row or not row[0]:
-        return False
-    return datetime.utcnow() - row[0] >= TASKS[task]["wait"]
+    return False if not row or not row[0] else datetime.utcnow() - row[0] >= TASKS[task]["wait"]
 
 def complete_task(uid, task):
-    cur.execute("""
-        UPDATE tasks
-        SET completed_at=%s
-        WHERE user_id=%s AND task=%s
-    """, (datetime.utcnow(), uid, task))
+    cur.execute("UPDATE tasks SET completed_at=%s WHERE user_id=%s AND task=%s", (datetime.utcnow(), uid, task))
     add_balance(uid, TASK_REWARD)
     conn.commit()
 
 def referral_info(uid):
-    cur.execute(
-        "SELECT referred_by, referral_paid FROM users WHERE user_id=%s",
-        (uid,)
-    )
+    cur.execute("SELECT referred_by, referral_paid FROM users WHERE user_id=%s", (uid,))
     return cur.fetchone()
 
 def mark_ref_paid(uid):
-    cur.execute(
-        "UPDATE users SET referral_paid=TRUE WHERE user_id=%s",
-        (uid,)
-    )
+    cur.execute("UPDATE users SET referral_paid=TRUE WHERE user_id=%s", (uid,))
     conn.commit()
 
-# ================= MENUS =================
+# ================= MENU =================
 menu = ReplyKeyboardMarkup(
-    [
-        ["💰 Earn Crypto", "📋 Tasks"],
-        ["👥 Refer & Earn", "📊 My Balance"],
-        ["🧾 Proof Payment", "❓ Help"],
-    ],
+    [["💰 Earn Crypto", "📋 Tasks"], ["👥 Refer & Earn", "📊 My Balance"], ["🧾 Proof Payment", "❓ Help"]],
     resize_keyboard=True
 )
 
@@ -180,10 +136,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     referred_by = context.args[0] if context.args else None
     add_user(uid, referred_by)
-    await update.message.reply_text(
-        "Welcome 👋\nComplete tasks & earn rewards!",
-        reply_markup=menu
-    )
+    await update.message.reply_text("Welcome 👋\nComplete tasks & earn rewards!", reply_markup=menu)
 
 # ================= MESSAGES =================
 async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -199,33 +152,21 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton(TASKS["airdrop"]["name"], callback_data="task_airdrop")],
             ])
         )
-        return
-
-    if text == "📊 My Balance":
+    elif text == "📊 My Balance":
         await update.message.reply_text(f"💰 Balance: {balance(uid):.2f} USD")
-        return
-
-    if text == "👥 Refer & Earn":
-        await update.message.reply_text(
-            f"Earn {REF_REWARD} USD per referral\n\n"
-            f"https://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}"
-        )
-        return
-
-    if text == "🧾 Proof Payment":
+    elif text == "👥 Refer & Earn":
+        await update.message.reply_text(f"Earn {REF_REWARD} USD per referral\n\nhttps://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}")
+    elif text == "🧾 Proof Payment":
         await update.message.reply_text("https://t.me/your_proof_channel")
-        return
-
-    if text == "❓ Help":
+    elif text == "❓ Help":
         await update.message.reply_text("Admin: @YourAdminUsername")
-        return
 
 # ================= TASK CLICK =================
 async def task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
     task = q.data.replace("task_", "")
-    print(f"[DEBUG] task_start clicked: {task}")  # Debug print
+    print(f"[DEBUG] task_start clicked: {task}")
     await q.answer()
 
     if not can_do_task(uid, task):
@@ -234,8 +175,7 @@ async def task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     start_ad(uid, task)
     await q.edit_message_text(
-        f"{TASKS[task]['name']} started 👇\n\n"
-        "Complete the task, then click **Claim Reward**",
+        f"{TASKS[task]['name']} started 👇\nComplete the task, then click Claim Reward",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 Open Task", url=TASKS[task]["url"])],
             [InlineKeyboardButton("✅ Claim Reward", callback_data=f"claim_{task}")]
@@ -247,7 +187,7 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
     task = q.data.replace("claim_", "")
-    print(f"[DEBUG] claim_reward clicked: {task}")  # Debug print
+    print(f"[DEBUG] claim_reward clicked: {task}")
     await q.answer()
 
     if not can_claim_ad(uid, task):
@@ -256,23 +196,17 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     complete_task(uid, task)
 
-    # Referral reward after first task only
     ref = referral_info(uid)
     if ref:
         referred_by, paid = ref
         if referred_by and not paid:
-            cur.execute(
-                "SELECT user_id FROM users WHERE ref_code=%s",
-                (referred_by,)
-            )
+            cur.execute("SELECT user_id FROM users WHERE ref_code=%s", (referred_by,))
             r = cur.fetchone()
             if r:
                 add_balance(r[0], REF_REWARD)
                 mark_ref_paid(uid)
 
-    await q.edit_message_text(
-        f"✅ {TASKS[task]['name']} completed!\n+{TASK_REWARD} USD added"
-    )
+    await q.edit_message_text(f"✅ {TASKS[task]['name']} completed!\n+{TASK_REWARD} USD added")
 
 # ================= ERROR HANDLER =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -283,8 +217,8 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
-    # Specific handlers for tasks & claim
     app.add_handler(CallbackQueryHandler(task_start, pattern="^task_"))
     app.add_handler(CallbackQueryHandler(claim_reward, pattern="^claim_"))
     app.add_error_handler(error_handler)
+    # Polling only → no conflicts
     app.run_polling()
