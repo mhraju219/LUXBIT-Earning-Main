@@ -1,47 +1,49 @@
 import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# /start command shows the main menu
+# Define keyboard menu
+keyboard = [
+    ["💰 Earn Crypto", "📋 Tasks"],
+    ["👥 Refer & Earn", "💸 Withdraw"],
+    ["📊 My Balance", "🧾 Proof Payment"],
+    ["❓ Help"]
+]
+reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+# /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("💰 Earn Crypto", callback_data='earn')],
-        [InlineKeyboardButton("📋 Tasks", callback_data='tasks')],
-        [InlineKeyboardButton("👥 Refer & Earn", callback_data='refer')],
-        [InlineKeyboardButton("💸 Withdraw", callback_data='withdraw')],
-        [InlineKeyboardButton("📊 My Balance", callback_data='balance')],
-        [InlineKeyboardButton("🧾 Proof Payment", callback_data='proof')],
-        [InlineKeyboardButton("❓ Help", callback_data='help')],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Welcome! Choose an option:", reply_markup=reply_markup)
+    await update.message.reply_text(
+        "Welcome! Choose an option from the menu below:",
+        reply_markup=reply_markup
+    )
 
-# Handle button clicks
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()  # acknowledge click
+# Handle user messages (keyboard input)
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
 
-    if query.data == "earn":
-        await query.edit_message_text("💰 Earn Crypto:\nComplete tasks and earn crypto daily!")
-    elif query.data == "tasks":
-        await query.edit_message_text("📋 Tasks:\n1. Watch videos\n2. Visit websites\n3. Complete surveys")
-    elif query.data == "refer":
-        await query.edit_message_text("👥 Refer & Earn:\nShare your referral link and earn rewards!")
-    elif query.data == "withdraw":
-        await query.edit_message_text("💸 Withdraw:\nClick here to withdraw your balance to your wallet.")
-    elif query.data == "balance":
-        await query.edit_message_text("📊 My Balance:\nYour current balance is: 0.0 Crypto")
-    elif query.data == "proof":
-        # You can replace this URL with your own proof channel or images
-        await query.edit_message_text("🧾 Proof Payment:\nCheck our proof payments here:\nhttps://t.me/your_payment_proof_channel")
-    elif query.data == "help":
-        await query.edit_message_text("❓ Help:\nIf you face any issue, contact admin: @YourAdminUsername")
+    if text == "💰 Earn Crypto":
+        await update.message.reply_text("💰 Earn Crypto:\nComplete tasks and earn crypto daily!")
+    elif text == "📋 Tasks":
+        await update.message.reply_text("📋 Tasks:\n1. Watch videos\n2. Visit websites\n3. Complete surveys")
+    elif text == "👥 Refer & Earn":
+        await update.message.reply_text("👥 Refer & Earn:\nShare your referral link and earn rewards!")
+    elif text == "💸 Withdraw":
+        await update.message.reply_text("💸 Withdraw:\nClick here to withdraw your balance to your wallet.")
+    elif text == "📊 My Balance":
+        await update.message.reply_text("📊 My Balance:\nYour current balance is: 0.0 Crypto")
+    elif text == "🧾 Proof Payment":
+        await update.message.reply_text("🧾 Proof Payment:\nCheck our proof payments here:\nhttps://t.me/your_payment_proof_channel")
+    elif text == "❓ Help":
+        await update.message.reply_text("❓ Help:\nIf you face any issue, contact admin: @YourAdminUsername")
+    else:
+        await update.message.reply_text("Please choose an option from the menu below.", reply_markup=reply_markup)
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button))
-    print("Bot is running with full menu...")
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("Bot is running with keyboard menu...")
     app.run_polling()
