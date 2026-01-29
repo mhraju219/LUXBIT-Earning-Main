@@ -1,196 +1,121 @@
-import os
-import sqlite3
-from flask import Flask, request
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    MessageHandler,
-    filters
-)
+import os import logging import sqlite3 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler import requests
 
-# ================== CONFIG ==================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-PROOF_CHANNEL_ID = int(os.getenv("PROOF_CHANNEL_ID"))
+==============================
 
-PORT = int(os.environ.get("PORT", 10000))
+Environment Variables
 
-# ================== DATABASE ==================
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-cur = conn.cursor()
+==============================
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    balance INTEGER DEFAULT 0
-)
-""")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID") WEBHOOK_URL = os.getenv("WEBHOOK_URL") BINANCE_API_KEY = os.getenv("BINANCE_API_KEY") BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET") PORT = int(os.getenv("PORT", 8443))
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS withdraws (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    amount INTEGER,
-    wallet TEXT,
-    status TEXT
-)
-""")
+for var_name in ['BOT_TOKEN', 'CHANNEL_ID', 'WEBHOOK_URL', 'BINANCE_API_KEY', 'BINANCE_API_SECRET']: if not globals()[var_name]: raise RuntimeError(f"Missing env var: {var_name}")
 
-conn.commit()
+==============================
 
-# ================== BOT ==================
-app_bot = Application.builder().token(BOT_TOKEN).build()
+Logging
 
-# ================== HANDLERS ==================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    cur.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (uid,))
+==============================
+
+logging.basicConfig( format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO, ) logger = logging.getLogger(name)
+
+==============================
+
+Database Setup
+
+==============================
+
+DB_FILE = 'bot_users.db' conn = sqlite3.connect(DB_FILE, check_same_thread=False) cursor = conn.cursor()
+
+Create tables if not exist
+
+cursor.execute(''' CREATE TABLE IF NOT EXISTS users ( user_id INTEGER PRIMARY KEY, balance REAL DEFAULT 0 ) ''')
+
+cursor.execute(''' CREATE TABLE IF NOT EXISTS withdrawals ( id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL, status TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP ) ''') conn.commit()
+
+==============================
+
+Helper Functions
+
+==============================
+
+def get_user_balance(user_id): cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)) row = cursor.fetchone() if row: return row[0] else: cursor.execute("INSERT INTO users (user_id, balance) VALUES (?, 0)", (user_id,)) conn.commit() return 0
+
+def update_user_balance(user_id, amount): balance = get_user_balance(user_id) + amount cursor.execute("UPDATE users SET balance=? WHERE user_id=?", (balance, user_id)) conn.commit() return balance
+
+def add_withdrawal(user_id, amount, status="pending"): cursor.execute("INSERT INTO withdrawals (user_id, amount, status) VALUES (?, ?, ?)" , (user_id, amount, status)) conn.commit()
+
+def fetch_withdrawal_proofs(): cursor.execute("SELECT user_id, amount, status, timestamp FROM withdrawals ORDER BY timestamp DESC LIMIT 5") rows = cursor.fetchall() if not rows: return "No withdrawal proofs yet." text = "📄 Recent withdrawal proofs:\n" for r in rows: text += f"- User {r[0]}: {r[1]} units ({r[2]})\n" return text
+
+==============================
+
+Handlers
+
+==============================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): keyboard = [ [InlineKeyboardButton("💰 Tasks", callback_data='tasks')], [InlineKeyboardButton("💸 Withdraw", callback_data='withdraw')], [InlineKeyboardButton("👥 Referral", callback_data='referral')], [InlineKeyboardButton("📄 Withdrawal Proof", callback_data='proof')], [InlineKeyboardButton("❓ Help", callback_data='help')] ] reply_markup = InlineKeyboardMarkup(keyboard) await update.message.reply_text("Welcome! Choose an option:", reply_markup=reply_markup)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE): query = update.callback_query await query.answer()
+
+if query.data == 'tasks':
+    await query.edit_message_text("💰 Available tasks:\n- Task 1: Watch a video\n- Task 2: Visit website\n- Task 3: Share referral")
+elif query.data == 'withdraw':
+    balance = get_user_balance(query.from_user.id)
+    await query.edit_message_text(f"💸 Your balance: {balance} units\nUse /withdraw <amount> to withdraw.")
+elif query.data == 'referral':
+    user_id = query.from_user.id
+    await query.edit_message_text(f"👥 Your referral link:\nhttps://t.me/YourBotUsername?start={user_id}")
+elif query.data == 'proof':
+    await query.edit_message_text(fetch_withdrawal_proofs())
+elif query.data == 'help':
+    await query.edit_message_text("❓ Help:\nUse menu to navigate tasks, withdraw, referral link, or proof")
+
+async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE): user_id = update.from_user.id amount = ' '.join(context.args) if context.args else None if not amount or not amount.isdigit(): await update.message.reply_text("❌ Invalid amount. Usage: /withdraw <amount>") return
+
+amount = float(amount)
+balance = get_user_balance(user_id)
+if amount > balance:
+    await update.message.reply_text(f"❌ Insufficient balance. Your balance: {balance}")
+    return
+
+# Deduct balance and add withdrawal entry
+update_user_balance(user_id, -amount)
+add_withdrawal(user_id, amount, status="pending")
+
+# Call Binance withdrawal (mock)
+success, message = process_binance_withdrawal(user_id, amount)
+if success:
+    # Update withdrawal status to completed
+    cursor.execute("UPDATE withdrawals SET status=? WHERE user_id=? AND amount=? AND status='pending'",
+                   ("completed", user_id, amount))
     conn.commit()
+await update.message.reply_text(message)
 
-    kb = [
-        [InlineKeyboardButton("💰 Earn", callback_data="earn")],
-        [InlineKeyboardButton("📊 Balance", callback_data="balance")],
-        [InlineKeyboardButton("💸 Withdraw", callback_data="withdraw")]
-    ]
-    if uid == ADMIN_ID:
-        kb.append([InlineKeyboardButton("👑 Admin", callback_data="admin")])
+==============================
 
-    await update.message.reply_text(
-        "🚀 Welcome to Earning Bot",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
+Binance integration (mock)
 
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    uid = q.from_user.id
-    await q.answer()
+==============================
 
-    if q.data == "earn":
-        cur.execute("UPDATE users SET balance = balance + 1 WHERE user_id=?", (uid,))
-        conn.commit()
-        await q.edit_message_text("✅ You earned 1 point")
+def process_binance_withdrawal(user_id, amount): try: logger.info(f"Processing withdrawal for user {user_id} amount {amount}") # Replace with real Binance API logic return True, f"✅ Withdrawal of {amount} units successful!" except Exception as e: logger.error(e) return False, f"❌ Withdrawal failed: {str(e)}"
 
-    elif q.data == "balance":
-        bal = cur.execute(
-            "SELECT balance FROM users WHERE user_id=?", (uid,)
-        ).fetchone()[0]
-        await q.edit_message_text(f"💰 Balance: {bal}")
+==============================
 
-    elif q.data == "withdraw":
-        bal = cur.execute(
-            "SELECT balance FROM users WHERE user_id=?", (uid,)
-        ).fetchone()[0]
-        if bal < 50:
-            await q.edit_message_text("❌ Minimum withdraw is 50 points")
-        else:
-            context.user_data["withdraw"] = True
-            await q.edit_message_text("✍️ Send your Binance UID")
+Main App
 
-    elif q.data == "admin" and uid == ADMIN_ID:
-        req = cur.execute(
-            "SELECT id,user_id,amount,wallet FROM withdraws WHERE status='pending'"
-        ).fetchone()
+==============================
 
-        if not req:
-            await q.edit_message_text("✅ No pending withdraws")
-        else:
-            wid, user, amt, wallet = req
-            kb = [
-                [
-                    InlineKeyboardButton("✅ Approve", callback_data=f"approve_{wid}"),
-                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_{wid}")
-                ]
-            ]
-            await q.edit_message_text(
-                f"💸 Withdraw Request\n\n"
-                f"User: {user}\n"
-                f"Amount: {amt}\n"
-                f"Binance UID: {wallet}",
-                reply_markup=InlineKeyboardMarkup(kb)
-            )
+def main(): app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    elif q.data.startswith("approve_"):
-        wid = q.data.split("_")[1]
-        cur.execute("UPDATE withdraws SET status='approved' WHERE id=?", (wid,))
-        conn.commit()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(button_handler))
+app.add_handler(CommandHandler("withdraw", withdraw_command))
 
-        user_id, amount, wallet = cur.execute(
-            "SELECT user_id,amount,wallet FROM withdraws WHERE id=?", (wid,)
-        ).fetchone()
+logger.info("Starting bot in Webhook mode with DB and Binance integration")
+app.run_webhook(
+    listen="0.0.0.0",
+    port=PORT,
+    url_path=BOT_TOKEN,
+    webhook_url=f"{WEBHOOK_URL}"
+)
 
-        proof = f"""
-✅ *Withdraw Paid*
-
-👤 User: `{user_id}`
-💰 Amount: `{amount}`
-🏦 Method: Binance UID
-📬 UID: `{wallet}`
-
-🔥 Trusted Bot
-"""
-        await context.bot.send_message(
-            PROOF_CHANNEL_ID,
-            proof,
-            parse_mode="Markdown"
-        )
-        await context.bot.send_message(
-            user_id,
-            "✅ Your withdraw has been paid!\n📢 Proof posted."
-        )
-        await q.edit_message_text("✅ Approved & Proof Posted")
-
-    elif q.data.startswith("reject_"):
-        wid = q.data.split("_")[1]
-        cur.execute("UPDATE withdraws SET status='rejected' WHERE id=?", (wid,))
-        conn.commit()
-        await q.edit_message_text("❌ Withdraw Rejected")
-
-async def wallet_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("withdraw"):
-        uid = update.effective_user.id
-        wallet = update.message.text
-
-        bal = cur.execute(
-            "SELECT balance FROM users WHERE user_id=?", (uid,)
-        ).fetchone()[0]
-
-        cur.execute("UPDATE users SET balance=0 WHERE user_id=?", (uid,))
-        cur.execute(
-            "INSERT INTO withdraws(user_id,amount,wallet,status) VALUES(?,?,?,?)",
-            (uid, bal, wallet, "pending")
-        )
-        conn.commit()
-
-        context.user_data["withdraw"] = False
-        await update.message.reply_text("✅ Withdraw request submitted")
-
-# ================== ADD HANDLERS ==================
-app_bot.add_handler(CommandHandler("start", start))
-app_bot.add_handler(CallbackQueryHandler(buttons))
-app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, wallet_input))
-
-# ================== FLASK WEBHOOK ==================
-flask_app = Flask(__name__)
-
-@flask_app.route("/", methods=["GET"])
-def index():
-    return "Bot is running"
-
-@flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), app_bot.bot)
-    app_bot.update_queue.put_nowait(update)
-    return "ok"
-
-# ================== RUN ==================
-if __name__ == "__main__":
-    app_bot.initialize()
-    app_bot.start()
-    flask_app.run(host="0.0.0.0", port=PORT)
+if name == "main": main()
