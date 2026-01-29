@@ -107,7 +107,12 @@ def add_balance(uid, amount):
 def balance(uid):
     cur.execute("SELECT balance FROM users WHERE user_id=%s", (uid,))
     row = cur.fetchone()
-    return float(row[0]) if row else 0.0
+    if row and row[0] is not None:
+        return float(row[0])
+    else:
+        # If user not in DB, auto-create
+        add_user(uid)
+        return 0.0
 
 def can_do_task(uid, task):
     cur.execute(
@@ -204,7 +209,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "👥 Refer & Earn":
         await update.message.reply_text(
             f"Earn {REF_REWARD} USD per referral\n\n"
-            f"https://t.me/LxbEarn_bot?start={ref_code(uid)}"
+            f"https://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}"
         )
         return
 
@@ -268,6 +273,10 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ {TASKS[task]['name']} completed!\n+{TASK_REWARD} USD added"
     )
 
+# ================= ERROR HANDLER =================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    print(f"Exception: {context.error}")
+
 # ================= RUN =================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -275,4 +284,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
     app.add_handler(CallbackQueryHandler(task_start, pattern="^task_"))
     app.add_handler(CallbackQueryHandler(claim_reward, pattern="^claim_"))
+    app.add_error_handler(error_handler)
     app.run_polling()
