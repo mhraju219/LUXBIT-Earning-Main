@@ -20,8 +20,7 @@ from telegram.ext import (
 # ================= CONFIG =================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
-
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "ADMIN_ID"))
 
 TASK_REWARD = 0.10
 MIN_WITHDRAW = 1.0
@@ -111,23 +110,10 @@ menu = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-stats_kb = InlineKeyboardMarkup([
-    [
-        InlineKeyboardButton("💰 Balance", callback_data="stats_balance"),
-        InlineKeyboardButton("📜 Task History", callback_data="stats_history"),
-    ]
-])
-
 withdraw_kb = InlineKeyboardMarkup([
-    [
-        InlineKeyboardButton("🪙 Crypto Wallet", callback_data="wd_crypto"),
-    ],
-    [
-        InlineKeyboardButton("💳 Digital Wallet", callback_data="wd_digital"),
-    ],
-    [
-        InlineKeyboardButton("📈 Staking Wallet", callback_data="wd_staking"),
-    ],
+    [InlineKeyboardButton("🪙 Crypto Wallet", callback_data="wd_crypto")],
+    [InlineKeyboardButton("💳 Digital Wallet", callback_data="wd_digital")],
+    [InlineKeyboardButton("📈 Staking Wallet", callback_data="wd_staking")],
 ])
 
 # ================= START =================
@@ -145,26 +131,41 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text
 
+    # EARN
     if text == "💰 Earn Crypto":
         await update.message.reply_text(
-            "🎥 Watch Video Task\n\nClick below 👇",
+            "🎥 Watch Video Task",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("▶ Watch Video", callback_data="watch_video")]
             ])
         )
 
+    # STATS (TEXT ONLY – NO INLINE)
     elif text == "📈 My Stats":
+        bal = get_balance(uid)
         await update.message.reply_text(
-            "📈 Your Stats",
-            reply_markup=stats_kb
+            f"📊 Your Account Stats\n\n"
+            f"💰 Balance: {bal:.2f} USD\n"
+            f"🎯 Tasks reset every 24 hours\n"
+            f"💸 Minimum withdrawal: {MIN_WITHDRAW} USD\n\n"
+            f"Keep earning 🚀"
         )
 
+    # WITHDRAW
     elif text == "💸 Withdraw":
-        await update.message.reply_text(
-            "Choose withdrawal method:",
-            reply_markup=withdraw_kb
-        )
+        bal = get_balance(uid)
+        if bal < MIN_WITHDRAW:
+            await update.message.reply_text(
+                f"❌ Minimum withdrawal is {MIN_WITHDRAW} USD\n"
+                f"Your balance: {bal:.2f} USD"
+            )
+        else:
+            await update.message.reply_text(
+                "Choose withdrawal method:",
+                reply_markup=withdraw_kb
+            )
 
+    # HELP
     elif text == "❓ Help":
         await update.message.reply_text("Admin support available.")
 
@@ -175,7 +176,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
     await q.answer()
 
-    # WATCH VIDEO
+    # WATCH VIDEO TASK
     if data == "watch_video":
         if not task_available(uid, "video"):
             await q.message.reply_text("⏳ Task resets after 24 hours.")
@@ -188,27 +189,30 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "After watching, send the **SECRET CODE**."
         )
 
-    # STATS
-    elif data == "stats_balance":
+    # WITHDRAW OPTIONS
+    elif data.startswith("wd_"):
         await q.message.reply_text(
-            f"💰 Balance: {get_balance(uid):.2f} USD"
+            "📩 Withdrawal request received.\nAdmin will contact you."
         )
 
-    elif data == "stats_history":
-        cur.execute(
-            "SELECT task, completed_at FROM tasks WHERE user_id=%s",
-            (uid,)
+        cur.execute("""
+            INSERT INTO withdrawals
+            (user_id, method, details, amount, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (
+            uid,
+            data.replace("wd_", ""),
+            "Pending user details",
+            get_balance(uid),
+            "PENDING",
+            datetime.utcnow()
+        ))
+        conn.commit()
+
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"📤 Withdrawal Request\nUser: {uid}\nMethod: {data}"
         )
-        rows = cur.fetchall()
-
-        if not rows:
-            msg = "No completed tasks yet."
-        else:
-            msg = "📜 Task History:\n"
-            for t, d in rows:
-                msg += f"• {t} — {d.strftime('%Y-%m-%d')}\n"
-
-        await q.message.reply_text(msg)
 
 # ================= SECRET CODE =================
 async def secret_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -221,7 +225,7 @@ async def secret_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["await_code"] = False
 
             await update.message.reply_text(
-                f"✅ Success!\n+{TASK_REWARD} USD added."
+                f"✅ Task completed!\n+{TASK_REWARD} USD added."
             )
         else:
             await update.message.reply_text("❌ Invalid code.")
