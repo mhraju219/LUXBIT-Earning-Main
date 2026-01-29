@@ -27,7 +27,25 @@ PORT = int(os.environ.get("PORT", 10000))
 TASK_REWARD = 0.10
 REF_REWARD = 0.50
 TASK_RESET_TIME = timedelta(hours=1)
-AD_WAIT_TIME = timedelta(minutes=10)
+
+# Task definitions
+TASKS = {
+    "watch": {
+        "name": "🎥 Watch Video",
+        "url": "https://example.com/video",
+        "wait": timedelta(minutes=10),
+    },
+    "visit": {
+        "name": "🌐 Visit Website",
+        "url": "https://example.com/website",
+        "wait": timedelta(minutes=3),
+    },
+    "airdrop": {
+        "name": "🪂 Claim Airdrop",
+        "url": "https://example.com/airdrop",
+        "wait": timedelta(minutes=5),
+    }
+}
 
 # ================= FLASK (PORT FIX) =================
 app_flask = Flask(__name__)
@@ -88,7 +106,8 @@ def add_balance(uid, amount):
 
 def balance(uid):
     cur.execute("SELECT balance FROM users WHERE user_id=%s", (uid,))
-    return cur.fetchone()[0]
+    row = cur.fetchone()
+    return float(row[0]) if row else 0.0
 
 def can_do_task(uid, task):
     cur.execute(
@@ -96,7 +115,7 @@ def can_do_task(uid, task):
         (uid, task)
     )
     row = cur.fetchone()
-    if not row:
+    if not row or not row[0]:
         return True
     return datetime.utcnow() - row[0] >= TASK_RESET_TIME
 
@@ -117,7 +136,7 @@ def can_claim_ad(uid, task):
     row = cur.fetchone()
     if not row or not row[0]:
         return False
-    return datetime.utcnow() - row[0] >= AD_WAIT_TIME
+    return datetime.utcnow() - row[0] >= TASKS[task]["wait"]
 
 def complete_task(uid, task):
     cur.execute("""
@@ -152,12 +171,11 @@ menu = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ================= START =================
+# ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     referred_by = context.args[0] if context.args else None
     add_user(uid, referred_by)
-
     await update.message.reply_text(
         "Welcome 👋\nComplete tasks & earn rewards!",
         reply_markup=menu
@@ -170,9 +188,11 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "📋 Tasks":
         await update.message.reply_text(
-            "Choose task:",
+            "Choose a task:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎥 Watch Video", callback_data="watch")],
+                [InlineKeyboardButton(TASKS["watch"]["name"], callback_data="task_watch")],
+                [InlineKeyboardButton(TASKS["visit"]["name"], callback_data="task_visit")],
+                [InlineKeyboardButton(TASKS["airdrop"]["name"], callback_data="task_airdrop")],
             ])
         )
         return
@@ -196,42 +216,41 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Admin: @YourAdminUsername")
         return
 
-# ================= TASK CALLBACK =================
-async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= TASK CLICK =================
+async def task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
-    task = q.data
+    task = q.data.replace("task_", "")
     await q.answer()
 
     if not can_do_task(uid, task):
-        await q.edit_message_text("⏳ Task available again after 1 hour.")
+        await q.edit_message_text("⏳ Task will reset after 1 hour.")
         return
 
     start_ad(uid, task)
-
     await q.edit_message_text(
-        "📺 Ad is loading...\n\n"
-        "Watch the video below 👇\n"
-        "After 10 minutes, click **Claim Reward**",
+        f"{TASKS[task]['name']} started 👇\n\n"
+        "Complete the task, then click **Claim Reward**",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("▶ Watch Ad", url="https://example.com/ad")],
-            [InlineKeyboardButton("✅ Claim Reward", callback_data="claim_watch")]
+            [InlineKeyboardButton("🔗 Open Task", url=TASKS[task]["url"])],
+            [InlineKeyboardButton("✅ Claim Reward", callback_data=f"claim_{task}")]
         ])
     )
 
-# ================= CLAIM =================
-async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= CLAIM REWARD =================
+async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
+    task = q.data.replace("claim_", "")
     await q.answer()
 
-    if not can_claim_ad(uid, "watch"):
-        await q.edit_message_text("⏳ Please wait 10 minutes.")
+    if not can_claim_ad(uid, task):
+        await q.edit_message_text("⏳ Task not completed yet. Please wait.")
         return
 
-    complete_task(uid, "watch")
+    complete_task(uid, task)
 
-    # Referral reward (first task only)
+    # Referral reward after first task only
     ref = referral_info(uid)
     if ref:
         referred_by, paid = ref
@@ -246,7 +265,7 @@ async def claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mark_ref_paid(uid)
 
     await q.edit_message_text(
-        f"✅ Task completed!\n+{TASK_REWARD} USD added"
+        f"✅ {TASKS[task]['name']} completed!\n+{TASK_REWARD} USD added"
     )
 
 # ================= RUN =================
@@ -254,6 +273,6 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
-    app.add_handler(CallbackQueryHandler(claim, pattern="claim_watch"))
-    app.add_handler(CallbackQueryHandler(tasks))
+    app.add_handler(CallbackQueryHandler(task_start, pattern="^task_"))
+    app.add_handler(CallbackQueryHandler(claim_reward, pattern="^claim_"))
     app.run_polling()
