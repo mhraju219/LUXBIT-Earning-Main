@@ -26,25 +26,37 @@ PORT = int(os.environ.get("PORT", 10000))
 
 TASK_REWARD = 0.10
 REF_REWARD = 0.50
-TASK_RESET_TIME = timedelta(hours=1)
+TASK_RESET_TIME = timedelta(hours=24)
 
-# Task definitions
+# ================= TASK DEFINITIONS =================
 TASKS = {
-    "watch": {"name": "🎥 Watch Video", "url": "https://example.com/video", "secret": "MYSECRET123"},
-    "visit": {"name": "🌐 Visit Website", "url": "https://example.com/website", "secret": None},
-    "airdrop": {"name": "🪂 Claim Airdrop", "url": "https://example.com/airdrop", "secret": None},
+    "watch": {
+        "name": "🎥 Watch Video",
+        "url": "https://example.com/video",
+        "secret": "VIDEO123",  # 🔐 CHANGE DAILY IF YOU WANT
+    },
+    "visit": {
+        "name": "🌐 Visit Website",
+        "url": "https://example.com",
+        "secret": "VISIT123",
+    },
+    "airdrop": {
+        "name": "🪂 Claim Airdrop",
+        "url": "https://example.com/airdrop",
+        "secret": "AIRDROP123",
+    },
 }
 
-# ================= FLASK HEALTH CHECK =================
+# ================= FLASK (PORT FIX) =================
 app_flask = Flask(__name__)
 
 @app_flask.route("/")
 def home():
-    return "Bot is running"
+    return "Bot running"
 
 threading.Thread(
     target=lambda: app_flask.run(host="0.0.0.0", port=PORT),
-    daemon=True
+    daemon=True,
 ).start()
 
 # ================= DATABASE =================
@@ -66,14 +78,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     user_id BIGINT,
     task TEXT,
     completed_at TIMESTAMP,
-    ad_started_at TIMESTAMP,
     UNIQUE(user_id, task)
 )
 """)
+
 conn.commit()
 
 # ================= HELPERS =================
-def ref_code(uid): return f"REF{uid}"
+def ref_code(uid):
+    return f"REF{uid}"
 
 def add_user(uid, referred_by=None):
     cur.execute("""
@@ -84,200 +97,163 @@ def add_user(uid, referred_by=None):
     conn.commit()
 
 def add_balance(uid, amount):
-    cur.execute("UPDATE users SET balance = balance + %s WHERE user_id=%s", (amount, uid))
+    cur.execute(
+        "UPDATE users SET balance = balance + %s WHERE user_id=%s",
+        (amount, uid),
+    )
     conn.commit()
 
 def balance(uid):
     cur.execute("SELECT balance FROM users WHERE user_id=%s", (uid,))
     row = cur.fetchone()
-    return float(row[0]) if row and row[0] is not None else 0.0
+    return float(row[0]) if row else 0.0
 
 def can_do_task(uid, task):
-    cur.execute("SELECT completed_at FROM tasks WHERE user_id=%s AND task=%s", (uid, task))
-    row = cur.fetchone()
-    return True if not row or not row[0] else datetime.utcnow() - row[0] >= TASK_RESET_TIME
-
-def start_ad(uid, task):
-    cur.execute("""
-        INSERT INTO tasks (user_id, task, ad_started_at)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (user_id, task)
-        DO UPDATE SET ad_started_at=%s
-    """, (uid, task, datetime.utcnow(), datetime.utcnow()))
-    conn.commit()
-
-def can_claim_ad(uid, task):
-    if TASKS[task]["secret"]:
-        # Claim by secret code
-        return False
-    cur.execute("SELECT ad_started_at FROM tasks WHERE user_id=%s AND task=%s", (uid, task))
+    cur.execute(
+        "SELECT completed_at FROM tasks WHERE user_id=%s AND task=%s",
+        (uid, task),
+    )
     row = cur.fetchone()
     if not row or not row[0]:
-        return False
-    return True  # user can click Claim Reward for normal tasks
+        return True
+    return datetime.utcnow() - row[0] >= TASK_RESET_TIME
 
 def complete_task(uid, task):
-    cur.execute("UPDATE tasks SET completed_at=%s WHERE user_id=%s AND task=%s", (datetime.utcnow(), uid, task))
+    cur.execute("""
+        INSERT INTO tasks (user_id, task, completed_at)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (user_id, task)
+        DO UPDATE SET completed_at=%s
+    """, (uid, task, datetime.utcnow(), datetime.utcnow()))
     add_balance(uid, TASK_REWARD)
     conn.commit()
 
 def referral_info(uid):
-    cur.execute("SELECT referred_by, referral_paid FROM users WHERE user_id=%s", (uid,))
+    cur.execute(
+        "SELECT referred_by, referral_paid FROM users WHERE user_id=%s",
+        (uid,),
+    )
     return cur.fetchone()
 
 def mark_ref_paid(uid):
-    cur.execute("UPDATE users SET referral_paid=TRUE WHERE user_id=%s", (uid,))
+    cur.execute(
+        "UPDATE users SET referral_paid=TRUE WHERE user_id=%s",
+        (uid,),
+    )
     conn.commit()
 
-# ================= MENU =================
+# ================= MENUS =================
 menu = ReplyKeyboardMarkup(
-    [["💰 Earn Crypto", "📋 Tasks"], ["👥 Refer & Earn", "📊 My Balance"], ["🧾 Proof Payment", "❓ Help"]],
-    resize_keyboard=True
+    [
+        ["💰 Earn Crypto", "📋 Tasks"],
+        ["👥 Refer & Earn", "📊 My Balance"],
+        ["🧾 Proof Payment", "❓ Help"],
+    ],
+    resize_keyboard=True,
 )
 
-# ================= COMMANDS =================
+def task_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(TASKS["watch"]["name"], callback_data="task_watch")],
+        [InlineKeyboardButton(TASKS["visit"]["name"], callback_data="task_visit")],
+        [InlineKeyboardButton(TASKS["airdrop"]["name"], callback_data="task_airdrop")],
+    ])
+
+# ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     referred_by = context.args[0] if context.args else None
     add_user(uid, referred_by)
-    await update.message.reply_text("Welcome 👋\nComplete tasks & earn rewards!", reply_markup=menu)
 
-# ================= MESSAGES =================
+    await update.message.reply_text(
+        "👋 Welcome!\n\nComplete tasks, submit secret codes & earn crypto.",
+        reply_markup=menu,
+    )
+
+# ================= MESSAGE HANDLER =================
 async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    text = update.message.text
+    text = update.message.text.strip()
 
-    # 1️⃣ Show tasks inline buttons
     if text in ["💰 Earn Crypto", "📋 Tasks"]:
-        await update.message.reply_text(
-            "Choose a task:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(TASKS["watch"]["name"], callback_data="task_watch")],
-                [InlineKeyboardButton(TASKS["visit"]["name"], callback_data="task_visit")],
-                [InlineKeyboardButton(TASKS["airdrop"]["name"], callback_data="task_airdrop")],
-            ])
-        )
+        await update.message.reply_text("Choose a task:", reply_markup=task_keyboard())
         return
 
-    # 2️⃣ Show balance
     if text == "📊 My Balance":
         await update.message.reply_text(f"💰 Balance: {balance(uid):.2f} USD")
         return
 
-    # 3️⃣ Refer & Earn
     if text == "👥 Refer & Earn":
         await update.message.reply_text(
-            f"Earn {REF_REWARD} USD per referral\n\nhttps://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}"
+            f"Earn {REF_REWARD} USD per referral\n\n"
+            f"https://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}"
         )
         return
 
-    # 4️⃣ Proof Payment
     if text == "🧾 Proof Payment":
         await update.message.reply_text("https://t.me/your_proof_channel")
         return
 
-    # 5️⃣ Help
     if text == "❓ Help":
         await update.message.reply_text("Admin: @YourAdminUsername")
         return
 
-    # 6️⃣ Secret code submission
+    # ===== SECRET CODE VALIDATION =====
     for task, data in TASKS.items():
-        if data.get("secret") and text == data["secret"]:
+        if text == data["secret"]:
             if not can_do_task(uid, task):
-                await update.message.reply_text("⏳ Task already claimed or still on cooldown.")
+                await update.message.reply_text(
+                    "⏳ You already completed this task.\nTry again after 24 hours."
+                )
                 return
+
             complete_task(uid, task)
 
-            # Referral
+            # Referral reward (one time)
             ref = referral_info(uid)
             if ref:
                 referred_by, paid = ref
                 if referred_by and not paid:
-                    cur.execute("SELECT user_id FROM users WHERE ref_code=%s", (referred_by,))
+                    cur.execute(
+                        "SELECT user_id FROM users WHERE ref_code=%s",
+                        (referred_by,),
+                    )
                     r = cur.fetchone()
                     if r:
                         add_balance(r[0], REF_REWARD)
                         mark_ref_paid(uid)
 
-            await update.message.reply_text(f"✅ Task '{data['name']}' completed!\n+{TASK_REWARD} USD added")
+            await update.message.reply_text(
+                f"🎉 **Task Completed Successfully!**\n\n"
+                f"✅ +{TASK_REWARD} USD added\n"
+                "🔒 Task resets after 24 hours"
+            )
             return
 
-    # If invalid code
-    if any(data.get("secret") for data in TASKS.values()):
-        await update.message.reply_text("❌ Invalid secret code. Please try again.")
+    if len(text) <= 20:
+        await update.message.reply_text("❌ Invalid secret code.")
 
-# ================= TASK CALLBACK =================
-async def tasks_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= CALLBACK TASK START =================
+async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    uid = q.from_user.id
+    await q.answer()
+
     task = q.data.replace("task_", "")
-    print(f"[DEBUG] Task clicked: {task}")
-    await q.answer()
+    data = TASKS[task]
 
-    if not can_do_task(uid, task):
-        await q.edit_message_text("⏳ Task available again after 1 hour.")
-        return
+    await q.edit_message_text(
+        f"{data['name']} 👇\n\n"
+        f"🔗 {data['url']}\n\n"
+        "📌 Watch / visit carefully.\n"
+        "✍️ Send the **secret code** from this task to claim reward."
+    )
 
-    start_ad(uid, task)
-
-    if TASKS[task]["secret"]:
-        await q.edit_message_text(
-            f"{TASKS[task]['name']} started 👇\n"
-            f"Watch this video: {TASKS[task]['url']}\n\n"
-            "After watching, send me the secret code from the video to claim your reward."
-        )
-    else:
-        await q.edit_message_text(
-            f"{TASKS[task]['name']} started 👇\n"
-            f"Open link: {TASKS[task]['url']}\n\n"
-            "Then click Claim Reward",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Claim Reward", callback_data=f"claim_{task}")]
-            ])
-        )
-
-# ================= CLAIM CALLBACK =================
-async def claim_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    uid = q.from_user.id
-    task = q.data.replace("claim_", "")
-    print(f"[DEBUG] Claim clicked: {task}")
-    await q.answer()
-
-    if TASKS[task]["secret"]:
-        await q.edit_message_text("❌ This task requires submitting a secret code from the video.")
-        return
-
-    if not can_do_task(uid, task):
-        await q.edit_message_text("⏳ Task already claimed or still on cooldown.")
-        return
-
-    complete_task(uid, task)
-
-    # Referral
-    ref = referral_info(uid)
-    if ref:
-        referred_by, paid = ref
-        if referred_by and not paid:
-            cur.execute("SELECT user_id FROM users WHERE ref_code=%s", (referred_by,))
-            r = cur.fetchone()
-            if r:
-                add_balance(r[0], REF_REWARD)
-                mark_ref_paid(uid)
-
-    await q.edit_message_text(f"✅ Task '{TASKS[task]['name']}' completed!\n+{TASK_REWARD} USD added")
-
-# ================= ERROR HANDLER =================
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print(f"[ERROR] Exception: {context.error}")
-
-# ================= RUN BOT =================
+# ================= RUN =================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(task_callback, pattern="^task_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
-    app.add_handler(CallbackQueryHandler(tasks_callback, pattern="^task_"))
-    app.add_handler(CallbackQueryHandler(claim_callback, pattern="^claim_"))
-    app.add_error_handler(error_handler)
+
     app.run_polling()
