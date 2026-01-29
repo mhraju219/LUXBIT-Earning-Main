@@ -204,7 +204,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "👥 Refer & Earn":
         await update.message.reply_text(
             f"Earn {REF_REWARD} USD per referral\n\n"
-            f"https://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}"
+            f"https://t.me/LxbEarn_bot?start={ref_code(uid)}"
         )
         return
 
