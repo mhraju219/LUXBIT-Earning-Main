@@ -165,7 +165,7 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "❓ Help":
-        await update.message.reply_text("Admin: @YourAdminUsername")
+        await update.message.reply_text("Admin: @lxbRewards")
         return
 
     # ===== USER INPUT STATES =====
