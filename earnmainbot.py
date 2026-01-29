@@ -1,9 +1,7 @@
 import os
-import threading
 from datetime import datetime, timedelta
 
 import psycopg
-from flask import Flask
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -22,44 +20,15 @@ from telegram.ext import (
 # ================= CONFIG =================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
-ADMIN_ID = int(os.environ["ADMIN_ID"])
-PORT = int(os.environ.get("PORT", 10000))
+
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
 
 TASK_REWARD = 0.10
-REF_REWARD = 0.50
-TASK_RESET_TIME = timedelta(hours=24)
 MIN_WITHDRAW = 1.0
+TASK_RESET = timedelta(hours=24)
 
-# ================= TASKS =================
-TASKS = {
-    "watch": {
-        "name": "🎥 Watch Video",
-        "url": "https://example.com/video",
-        "secret": "VIDEO123",
-    },
-    "visit": {
-        "name": "🌐 Visit Website",
-        "url": "https://example.com",
-        "secret": "VISIT123",
-    },
-    "airdrop": {
-        "name": "🪂 Claim Airdrop",
-        "url": "https://example.com/airdrop",
-        "secret": "AIRDROP123",
-    },
-}
-
-# ================= FLASK =================
-app_flask = Flask(__name__)
-
-@app_flask.route("/")
-def home():
-    return "Bot running"
-
-threading.Thread(
-    target=lambda: app_flask.run(host="0.0.0.0", port=PORT),
-    daemon=True,
-).start()
+VIDEO_LINK = "https://example.com/video"
+SECRET_CODE = "ABC123"
 
 # ================= DATABASE =================
 conn = psycopg.connect(DATABASE_URL)
@@ -68,10 +37,7 @@ cur = conn.cursor()
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id BIGINT PRIMARY KEY,
-    balance NUMERIC DEFAULT 0,
-    ref_code TEXT UNIQUE,
-    referred_by TEXT,
-    referral_paid BOOLEAN DEFAULT FALSE
+    balance NUMERIC DEFAULT 0
 )
 """)
 
@@ -80,15 +46,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     user_id BIGINT,
     task TEXT,
     completed_at TIMESTAMP,
-    UNIQUE(user_id, task)
+    PRIMARY KEY (user_id, task)
 )
 """)
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS withdrawals (
-    id SERIAL PRIMARY KEY,
     user_id BIGINT,
-    type TEXT,
+    method TEXT,
     details TEXT,
     amount NUMERIC,
     status TEXT,
@@ -98,171 +63,176 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 
 conn.commit()
 
-# ================= MEMORY STATE =================
-user_states = {}
-
 # ================= HELPERS =================
-def ref_code(uid): return f"REF{uid}"
-
-def add_user(uid, referred_by=None):
-    cur.execute("""
-        INSERT INTO users (user_id, ref_code, referred_by)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (user_id) DO NOTHING
-    """, (uid, ref_code(uid), referred_by))
+def add_user(uid):
+    cur.execute(
+        "INSERT INTO users (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
+        (uid,)
+    )
     conn.commit()
 
-def balance(uid):
+def get_balance(uid):
     cur.execute("SELECT balance FROM users WHERE user_id=%s", (uid,))
-    r = cur.fetchone()
-    return float(r[0]) if r else 0.0
+    return float(cur.fetchone()[0])
 
-def add_balance(uid, amt):
-    cur.execute("UPDATE users SET balance=balance+%s WHERE user_id=%s", (amt, uid))
+def add_balance(uid, amount):
+    cur.execute(
+        "UPDATE users SET balance = balance + %s WHERE user_id=%s",
+        (amount, uid)
+    )
     conn.commit()
 
-def deduct_balance(uid, amt):
-    cur.execute("UPDATE users SET balance=balance-%s WHERE user_id=%s", (amt, uid))
-    conn.commit()
-
-def can_do_task(uid, task):
-    cur.execute("SELECT completed_at FROM tasks WHERE user_id=%s AND task=%s", (uid, task))
-    r = cur.fetchone()
-    if not r: return True
-    return datetime.utcnow() - r[0] >= TASK_RESET_TIME
+def task_available(uid, task):
+    cur.execute(
+        "SELECT completed_at FROM tasks WHERE user_id=%s AND task=%s",
+        (uid, task)
+    )
+    row = cur.fetchone()
+    if not row:
+        return True
+    return datetime.utcnow() - row[0] >= TASK_RESET
 
 def complete_task(uid, task):
     cur.execute("""
         INSERT INTO tasks (user_id, task, completed_at)
-        VALUES (%s,%s,%s)
-        ON CONFLICT (user_id,task)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (user_id, task)
         DO UPDATE SET completed_at=%s
     """, (uid, task, datetime.utcnow(), datetime.utcnow()))
     add_balance(uid, TASK_REWARD)
     conn.commit()
 
-# ================= MENUS =================
+# ================= KEYBOARDS =================
 menu = ReplyKeyboardMarkup(
     [
-        ["💰 Earn Crypto", "📋 Tasks"],
-        ["📊 My Balance", "📈 My Stats"],
-        ["👥 Refer & Earn"],
-        ["💸 Withdraw"],
-        ["🧾 Proof Payment", "❓ Help"],
+        ["💰 Earn Crypto", "📈 My Stats"],
+        ["💸 Withdraw", "❓ Help"],
     ],
-    resize_keyboard=True,
+    resize_keyboard=True
 )
 
-def task_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(v["name"], callback_data=f"task_{k}")]
-        for k, v in TASKS.items()
-    ])
+stats_kb = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("💰 Balance", callback_data="stats_balance"),
+        InlineKeyboardButton("📜 Task History", callback_data="stats_history"),
+    ]
+])
 
-def withdraw_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 Crypto Wallet", callback_data="wd_crypto")],
-        [InlineKeyboardButton("📱 Digital Wallet", callback_data="wd_digital")],
-        [InlineKeyboardButton("🔒 Staking Wallet", callback_data="wd_staking")],
-    ])
-
-def staking_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📆 Daily 1% APY", callback_data="stk_daily")],
-        [InlineKeyboardButton("📅 Monthly 3% APY", callback_data="stk_monthly")],
-        [InlineKeyboardButton("🗓 Yearly 5% APY", callback_data="stk_yearly")],
-    ])
+withdraw_kb = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("🪙 Crypto Wallet", callback_data="wd_crypto"),
+    ],
+    [
+        InlineKeyboardButton("💳 Digital Wallet", callback_data="wd_digital"),
+    ],
+    [
+        InlineKeyboardButton("📈 Staking Wallet", callback_data="wd_staking"),
+    ],
+])
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    add_user(uid, context.args[0] if context.args else None)
-    await update.message.reply_text("Welcome 👋", reply_markup=menu)
+    add_user(uid)
+
+    await update.message.reply_text(
+        "👋 Welcome!\nEarn crypto by completing tasks.",
+        reply_markup=menu
+    )
 
 # ================= MESSAGES =================
 async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    text = update.message.text.strip()
+    text = update.message.text
 
-    if text in ["💰 Earn Crypto", "📋 Tasks"]:
-        await update.message.reply_text("Choose task:", reply_markup=task_keyboard())
-        return
+    if text == "💰 Earn Crypto":
+        await update.message.reply_text(
+            "🎥 Watch Video Task\n\nClick below 👇",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶ Watch Video", callback_data="watch_video")]
+            ])
+        )
 
-    if text == "📊 My Balance":
-        await update.message.reply_text(f"💰 Balance: {balance(uid):.2f} USD")
-        return
+    elif text == "📈 My Stats":
+        await update.message.reply_text(
+            "📈 Your Stats",
+            reply_markup=stats_kb
+        )
 
-    if text == "💸 Withdraw":
-        if balance(uid) < MIN_WITHDRAW:
-            await update.message.reply_text("❌ Minimum withdrawal is 1 USD.")
-            return
-        await update.message.reply_text("Choose withdrawal method:", reply_markup=withdraw_keyboard())
-        return
+    elif text == "💸 Withdraw":
+        await update.message.reply_text(
+            "Choose withdrawal method:",
+            reply_markup=withdraw_kb
+        )
 
-    # SECRET CODE TASKS
-    for t, d in TASKS.items():
-        if text == d["secret"]:
-            if not can_do_task(uid, t):
-                await update.message.reply_text("⏳ Task already completed today.")
-                return
-            complete_task(uid, t)
-            await update.message.reply_text(f"✅ Task completed! +{TASK_REWARD} USD")
-            return
+    elif text == "❓ Help":
+        await update.message.reply_text("Admin support available.")
 
-    # WITHDRAW STATE
-    state = user_states.get(uid)
-    if state:
-        state["data"].append(text)
-        await finalize_withdraw(uid, context)
-        user_states.pop(uid)
-        await update.message.reply_text("✅ Withdrawal request submitted.")
-        return
-
-    await update.message.reply_text("❓ Invalid input.")
-
-# ================= TASK CALLBACK =================
-async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    task = q.data.replace("task_", "")
-    t = TASKS[task]
-    await q.edit_message_text(
-        f"{t['name']}\n\n{t['url']}\n\nSend secret code to claim reward."
-    )
-
-# ================= WITHDRAW CALLBACK =================
-async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= CALLBACKS =================
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
+    data = q.data
     await q.answer()
 
-    user_states[uid] = {"type": q.data, "data": []}
-    await q.edit_message_text("✍️ Enter required details:")
+    # WATCH VIDEO
+    if data == "watch_video":
+        if not task_available(uid, "video"):
+            await q.message.reply_text("⏳ Task resets after 24 hours.")
+            return
 
-# ================= FINALIZE WITHDRAW =================
-async def finalize_withdraw(uid, context):
-    state = user_states[uid]
-    details = ", ".join(state["data"])
-    amt = balance(uid)
+        context.user_data["await_code"] = True
 
-    deduct_balance(uid, amt)
+        await q.message.reply_text(
+            f"▶ Watch video:\n{VIDEO_LINK}\n\n"
+            "After watching, send the **SECRET CODE**."
+        )
 
-    cur.execute("""
-        INSERT INTO withdrawals (user_id, type, details, amount, status, created_at)
-        VALUES (%s,%s,%s,%s,'Pending',%s)
-    """, (uid, state["type"], details, amt, datetime.utcnow()))
-    conn.commit()
+    # STATS
+    elif data == "stats_balance":
+        await q.message.reply_text(
+            f"💰 Balance: {get_balance(uid):.2f} USD"
+        )
 
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"💸 New Withdrawal\nUser: {uid}\nType: {state['type']}\nAmount: {amt}\nDetails: {details}"
-    )
+    elif data == "stats_history":
+        cur.execute(
+            "SELECT task, completed_at FROM tasks WHERE user_id=%s",
+            (uid,)
+        )
+        rows = cur.fetchall()
+
+        if not rows:
+            msg = "No completed tasks yet."
+        else:
+            msg = "📜 Task History:\n"
+            for t, d in rows:
+                msg += f"• {t} — {d.strftime('%Y-%m-%d')}\n"
+
+        await q.message.reply_text(msg)
+
+# ================= SECRET CODE =================
+async def secret_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+
+    if context.user_data.get("await_code"):
+        if text == SECRET_CODE:
+            complete_task(uid, "video")
+            context.user_data["await_code"] = False
+
+            await update.message.reply_text(
+                f"✅ Success!\n+{TASK_REWARD} USD added."
+            )
+        else:
+            await update.message.reply_text("❌ Invalid code.")
 
 # ================= RUN =================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(task_callback, pattern="^task_"))
-    app.add_handler(CallbackQueryHandler(withdraw_callback, pattern="^wd_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
-    app.run_polling()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, secret_code))
+    app.add_handler(CallbackQueryHandler(callbacks))
+
+    app.run_polling(drop_pending_updates=True)
