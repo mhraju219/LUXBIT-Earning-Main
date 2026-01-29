@@ -110,7 +110,6 @@ def balance(uid):
     if row and row[0] is not None:
         return float(row[0])
     else:
-        # If user not in DB, auto-create
         add_user(uid)
         return 0.0
 
@@ -226,6 +225,7 @@ async def task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
     task = q.data.replace("task_", "")
+    print(f"[DEBUG] task_start clicked: {task}")  # Debug print
     await q.answer()
 
     if not can_do_task(uid, task):
@@ -247,6 +247,7 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
     task = q.data.replace("claim_", "")
+    print(f"[DEBUG] claim_reward clicked: {task}")  # Debug print
     await q.answer()
 
     if not can_claim_ad(uid, task):
@@ -275,13 +276,14 @@ async def claim_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= ERROR HANDLER =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print(f"Exception: {context.error}")
+    print(f"[ERROR] Exception: {context.error}")
 
 # ================= RUN =================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
+    # Specific handlers for tasks & claim
     app.add_handler(CallbackQueryHandler(task_start, pattern="^task_"))
     app.add_handler(CallbackQueryHandler(claim_reward, pattern="^claim_"))
     app.add_error_handler(error_handler)
