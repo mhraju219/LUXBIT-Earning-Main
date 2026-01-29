@@ -38,7 +38,7 @@ threading.Thread(
 ).start()
 
 # ---------------- PostgreSQL ----------------
-conn = psycopg2.connect(DATABASE_URL)
+conn = psycopg.connect(DATABASE_URL)
 cur = conn.cursor()
 
 cur.execute("""
