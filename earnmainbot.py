@@ -1,23 +1,15 @@
 import os
-import logging
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-logging.basicConfig(level=logging.INFO)
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Get your bot token from environment variable
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
-
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text("✅ Bot is alive!")
-
-def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start))
-    updater.start_polling()
-    updater.idle()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Hello! I am your bot.")
 
 if __name__ == "__main__":
-    main()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    print("Bot is running...")
+    app.run_polling()
