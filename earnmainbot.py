@@ -1,7 +1,9 @@
 import os
+import threading
 from datetime import datetime, timedelta
 
 import psycopg
+from flask import Flask
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -20,14 +22,42 @@ from telegram.ext import (
 # ================= CONFIG =================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "ADMIN_ID"))
+PORT = int(os.environ.get("PORT", 10000))
 
 TASK_REWARD = 0.10
-MIN_WITHDRAW = 1.0
-TASK_RESET = timedelta(hours=24)
+REF_REWARD = 0.50
+TASK_RESET_TIME = timedelta(hours=24)
 
-VIDEO_LINK = "https://example.com/video"
-SECRET_CODE = "ABC123"
+# ================= TASK DEFINITIONS =================
+TASKS = {
+    "watch": {
+        "name": "🎥 Watch Video",
+        "url": "https://example.com/video",
+        "secret": "VIDEO123",  # 🔐 CHANGE DAILY IF YOU WANT
+    },
+    "visit": {
+        "name": "🌐 Visit Website",
+        "url": "https://example.com",
+        "secret": "VISIT123",
+    },
+    "airdrop": {
+        "name": "🪂 Claim Airdrop",
+        "url": "https://example.com/airdrop",
+        "secret": "AIRDROP123",
+    },
+}
+
+# ================= FLASK (PORT FIX) =================
+app_flask = Flask(__name__)
+
+@app_flask.route("/")
+def home():
+    return "Bot running"
+
+threading.Thread(
+    target=lambda: app_flask.run(host="0.0.0.0", port=PORT),
+    daemon=True,
+).start()
 
 # ================= DATABASE =================
 conn = psycopg.connect(DATABASE_URL)
@@ -36,7 +66,10 @@ cur = conn.cursor()
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id BIGINT PRIMARY KEY,
-    balance NUMERIC DEFAULT 0
+    balance NUMERIC DEFAULT 0,
+    ref_code TEXT UNIQUE,
+    referred_by TEXT,
+    referral_paid BOOLEAN DEFAULT FALSE
 )
 """)
 
@@ -45,51 +78,45 @@ CREATE TABLE IF NOT EXISTS tasks (
     user_id BIGINT,
     task TEXT,
     completed_at TIMESTAMP,
-    PRIMARY KEY (user_id, task)
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS withdrawals (
-    user_id BIGINT,
-    method TEXT,
-    details TEXT,
-    amount NUMERIC,
-    status TEXT,
-    created_at TIMESTAMP
+    UNIQUE(user_id, task)
 )
 """)
 
 conn.commit()
 
 # ================= HELPERS =================
-def add_user(uid):
-    cur.execute(
-        "INSERT INTO users (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
-        (uid,)
-    )
-    conn.commit()
+def ref_code(uid):
+    return f"REF{uid}"
 
-def get_balance(uid):
-    cur.execute("SELECT balance FROM users WHERE user_id=%s", (uid,))
-    return float(cur.fetchone()[0])
+def add_user(uid, referred_by=None):
+    cur.execute("""
+        INSERT INTO users (user_id, ref_code, referred_by)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (user_id) DO NOTHING
+    """, (uid, ref_code(uid), referred_by))
+    conn.commit()
 
 def add_balance(uid, amount):
     cur.execute(
         "UPDATE users SET balance = balance + %s WHERE user_id=%s",
-        (amount, uid)
+        (amount, uid),
     )
     conn.commit()
 
-def task_available(uid, task):
+def balance(uid):
+    cur.execute("SELECT balance FROM users WHERE user_id=%s", (uid,))
+    row = cur.fetchone()
+    return float(row[0]) if row else 0.0
+
+def can_do_task(uid, task):
     cur.execute(
         "SELECT completed_at FROM tasks WHERE user_id=%s AND task=%s",
-        (uid, task)
+        (uid, task),
     )
     row = cur.fetchone()
-    if not row:
+    if not row or not row[0]:
         return True
-    return datetime.utcnow() - row[0] >= TASK_RESET
+    return datetime.utcnow() - row[0] >= TASK_RESET_TIME
 
 def complete_task(uid, task):
     cur.execute("""
@@ -101,142 +128,132 @@ def complete_task(uid, task):
     add_balance(uid, TASK_REWARD)
     conn.commit()
 
-# ================= KEYBOARDS =================
+def referral_info(uid):
+    cur.execute(
+        "SELECT referred_by, referral_paid FROM users WHERE user_id=%s",
+        (uid,),
+    )
+    return cur.fetchone()
+
+def mark_ref_paid(uid):
+    cur.execute(
+        "UPDATE users SET referral_paid=TRUE WHERE user_id=%s",
+        (uid,),
+    )
+    conn.commit()
+
+# ================= MENUS =================
 menu = ReplyKeyboardMarkup(
     [
-        ["💰 Earn Crypto", "📈 My Stats"],
-        ["💸 Withdraw", "❓ Help"],
+        ["💰 Earn Crypto", "📋 Tasks"],
+        ["👥 Refer & Earn", "📊 My Balance"],
+        ["🧾 Proof Payment", "❓ Help"],
     ],
-    resize_keyboard=True
+    resize_keyboard=True,
 )
 
-withdraw_kb = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🪙 Crypto Wallet", callback_data="wd_crypto")],
-    [InlineKeyboardButton("💳 Digital Wallet", callback_data="wd_digital")],
-    [InlineKeyboardButton("📈 Staking Wallet", callback_data="wd_staking")],
-])
+def task_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(TASKS["watch"]["name"], callback_data="task_watch")],
+        [InlineKeyboardButton(TASKS["visit"]["name"], callback_data="task_visit")],
+        [InlineKeyboardButton(TASKS["airdrop"]["name"], callback_data="task_airdrop")],
+    ])
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    add_user(uid)
+    referred_by = context.args[0] if context.args else None
+    add_user(uid, referred_by)
 
     await update.message.reply_text(
-        "👋 Welcome!\nEarn crypto by completing tasks.",
-        reply_markup=menu
+        "👋 Welcome!\n\nComplete tasks, submit secret codes & earn crypto.",
+        reply_markup=menu,
     )
 
-# ================= MESSAGES =================
+# ================= MESSAGE HANDLER =================
 async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    text = update.message.text
-
-    # EARN
-    if text == "💰 Earn Crypto":
-        await update.message.reply_text(
-            "🎥 Watch Video Task",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("▶ Watch Video", callback_data="watch_video")]
-            ])
-        )
-
-    # STATS (TEXT ONLY – NO INLINE)
-    elif text == "📈 My Stats":
-        bal = get_balance(uid)
-        await update.message.reply_text(
-            f"📊 Your Account Stats\n\n"
-            f"💰 Balance: {bal:.2f} USD\n"
-            f"🎯 Tasks reset every 24 hours\n"
-            f"💸 Minimum withdrawal: {MIN_WITHDRAW} USD\n\n"
-            f"Keep earning 🚀"
-        )
-
-    # WITHDRAW
-    elif text == "💸 Withdraw":
-        bal = get_balance(uid)
-        if bal < MIN_WITHDRAW:
-            await update.message.reply_text(
-                f"❌ Minimum withdrawal is {MIN_WITHDRAW} USD\n"
-                f"Your balance: {bal:.2f} USD"
-            )
-        else:
-            await update.message.reply_text(
-                "Choose withdrawal method:",
-                reply_markup=withdraw_kb
-            )
-
-    # HELP
-    elif text == "❓ Help":
-        await update.message.reply_text("Admin support available.")
-
-# ================= CALLBACKS =================
-async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    uid = q.from_user.id
-    data = q.data
-    await q.answer()
-
-    # WATCH VIDEO TASK
-    if data == "watch_video":
-        if not task_available(uid, "video"):
-            await q.message.reply_text("⏳ Task resets after 24 hours.")
-            return
-
-        context.user_data["await_code"] = True
-
-        await q.message.reply_text(
-            f"▶ Watch video:\n{VIDEO_LINK}\n\n"
-            "After watching, send the **SECRET CODE**."
-        )
-
-    # WITHDRAW OPTIONS
-    elif data.startswith("wd_"):
-        await q.message.reply_text(
-            "📩 Withdrawal request received.\nAdmin will contact you."
-        )
-
-        cur.execute("""
-            INSERT INTO withdrawals
-            (user_id, method, details, amount, status, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (
-            uid,
-            data.replace("wd_", ""),
-            "Pending user details",
-            get_balance(uid),
-            "PENDING",
-            datetime.utcnow()
-        ))
-        conn.commit()
-
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"📤 Withdrawal Request\nUser: {uid}\nMethod: {data}"
-        )
-
-# ================= SECRET CODE =================
-async def secret_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
 
-    if context.user_data.get("await_code"):
-        if text == SECRET_CODE:
-            complete_task(uid, "video")
-            context.user_data["await_code"] = False
+    if text in ["💰 Earn Crypto", "📋 Tasks"]:
+        await update.message.reply_text("Choose a task:", reply_markup=task_keyboard())
+        return
+
+    if text == "📊 My Balance":
+        await update.message.reply_text(f"💰 Balance: {balance(uid):.2f} USD")
+        return
+
+    if text == "👥 Refer & Earn":
+        await update.message.reply_text(
+            f"Earn {REF_REWARD} USD per referral\n\n"
+            f"https://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}"
+        )
+        return
+
+    if text == "🧾 Proof Payment":
+        await update.message.reply_text("https://t.me/your_proof_channel")
+        return
+
+    if text == "❓ Help":
+        await update.message.reply_text("Admin: @YourAdminUsername")
+        return
+
+    # ===== SECRET CODE VALIDATION =====
+    for task, data in TASKS.items():
+        if text == data["secret"]:
+            if not can_do_task(uid, task):
+                await update.message.reply_text(
+                    "⏳ You already completed this task.\nTry again after 24 hours."
+                )
+                return
+
+            complete_task(uid, task)
+
+            # Referral reward (one time)
+            ref = referral_info(uid)
+            if ref:
+                referred_by, paid = ref
+                if referred_by and not paid:
+                    cur.execute(
+                        "SELECT user_id FROM users WHERE ref_code=%s",
+                        (referred_by,),
+                    )
+                    r = cur.fetchone()
+                    if r:
+                        add_balance(r[0], REF_REWARD)
+                        mark_ref_paid(uid)
 
             await update.message.reply_text(
-                f"✅ Task completed!\n+{TASK_REWARD} USD added."
+                f"🎉 **Task Completed Successfully!**\n\n"
+                f"✅ +{TASK_REWARD} USD added\n"
+                "🔒 Task resets after 24 hours"
             )
-        else:
-            await update.message.reply_text("❌ Invalid code.")
+            return
+
+    if len(text) <= 20:
+        await update.message.reply_text("❌ Invalid secret code.")
+
+# ================= CALLBACK TASK START =================
+async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    task = q.data.replace("task_", "")
+    data = TASKS[task]
+
+    await q.edit_message_text(
+        f"{data['name']} 👇\n\n"
+        f"🔗 {data['url']}\n\n"
+        "📌 Watch / visit carefully.\n"
+        "✍️ Send the **secret code** from this task to claim reward."
+    )
 
 # ================= RUN =================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(task_callback, pattern="^task_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, secret_code))
-    app.add_handler(CallbackQueryHandler(callbacks))
 
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling()
