@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Bot is alive and running!")
+    await update.message.reply_text("✅ Bot is alive!")
 
 def main():
     if not BOT_TOKEN:
@@ -17,8 +17,7 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-
-    # Use polling for now (most stable)
+    # Use polling first for testing
     app.run_polling()
 
 if __name__ == "__main__":
