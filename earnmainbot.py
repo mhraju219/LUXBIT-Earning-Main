@@ -22,7 +22,7 @@ from telegram.ext import (
 # ================= CONFIG =================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # your Telegram ID
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "ADMIN_ID"))  # your Telegram ID
 PORT = int(os.environ.get("PORT", 10000))
 
 TASK_REWARD = 0.10
@@ -52,6 +52,7 @@ threading.Thread(
 conn = psycopg.connect(DATABASE_URL)
 cur = conn.cursor()
 
+# Users table
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id BIGINT PRIMARY KEY,
@@ -62,12 +63,25 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
+# Tasks table
 cur.execute("""
 CREATE TABLE IF NOT EXISTS tasks (
     user_id BIGINT,
     task TEXT,
     completed_at TIMESTAMP,
     UNIQUE(user_id, task)
+)
+""")
+
+# Withdrawals table
+cur.execute("""
+CREATE TABLE IF NOT EXISTS withdrawals (
+    user_id BIGINT,
+    method TEXT,
+    info TEXT,
+    amount NUMERIC DEFAULT 0,
+    status TEXT DEFAULT 'Pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
 
@@ -131,12 +145,26 @@ def mark_ref_paid(uid):
     )
     conn.commit()
 
+def get_withdraw_status(uid):
+    cur.execute(
+        "SELECT method, amount, status, created_at FROM withdrawals WHERE user_id=%s ORDER BY created_at DESC",
+        (uid,)
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return "No withdrawals yet."
+    lines = []
+    for r in rows[:5]:  # show last 5 withdrawals
+        lines.append(f"{r[0]} | {r[1]:.2f} USD | {r[2]} | {r[3].strftime('%Y-%m-%d %H:%M')}")
+    return "\n".join(lines)
+
 # ================= MENUS =================
 menu = ReplyKeyboardMarkup(
     [
         ["💰 Earn Crypto", "📋 Tasks"],
         ["👥 Refer & Earn", "📊 My Stats"],
-        ["🧾 Proof Payment", "💸 Withdraw", "❓ Help"],  # Withdraw added
+        ["💸 Withdraw"],
+        ["🧾 Proof Payment", "❓ Help"],
     ],
     resize_keyboard=True,
 )
@@ -176,12 +204,12 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
 
-    # ----- Tasks -----
+    # Tasks
     if text in ["💰 Earn Crypto", "📋 Tasks"]:
         await update.message.reply_text("Choose a task:", reply_markup=task_keyboard())
         return
 
-    # ----- My Stats -----
+    # My Stats
     if text == "📊 My Stats":
         await update.message.reply_text(
             f"📊 **Your Stats**\n\n"
@@ -189,12 +217,13 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔹 Tasks completed:\n" +
             "\n".join(
                 [f"{t['name']}: ✅" if not can_do_task(uid, key) else f"{t['name']}: ❌" for key, t in TASKS.items()]
-            ),
+            ) +
+            "\n\n💸 Last Withdrawals:\n" + get_withdraw_status(uid),
             parse_mode="Markdown"
         )
         return
 
-    # ----- Referral -----
+    # Referral
     if text == "👥 Refer & Earn":
         await update.message.reply_text(
             f"Earn {REF_REWARD} USD per referral\n\n"
@@ -202,36 +231,43 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ----- Proof Payment -----
+    # Proof Payment
     if text == "🧾 Proof Payment":
         await update.message.reply_text("https://t.me/your_proof_channel")
         return
 
-    # ----- Help -----
+    # Help
     if text == "❓ Help":
         await update.message.reply_text("Admin: @YourAdminUsername")
         return
 
-    # ----- Withdraw -----
+    # Withdraw
     if text == "💸 Withdraw":
         await update.message.reply_text("Select withdrawal method:", reply_markup=withdraw_keyboard())
         return
 
-    # ----- Collect Withdraw Data -----
+    # Withdraw data collection
     if context.user_data.get("withdraw_method") in ["crypto", "digital"]:
         info_type = "Crypto Wallet" if context.user_data.get("withdraw_method") == "crypto" else "Digital Wallet"
         context.user_data["withdraw_info"] = text
+        # save withdrawal
+        cur.execute(
+            "INSERT INTO withdrawals (user_id, method, info, amount) VALUES (%s,%s,%s,%s)",
+            (uid, info_type, text, balance(uid))
+        )
+        conn.commit()
         await update.message.reply_text(f"✅ {info_type} info received.\nAdmin will process it.")
         await context.bot.send_message(chat_id=ADMIN_ID, text=f"{info_type} Withdrawal Request:\nUser: {uid}\n{text}")
         context.user_data.pop("withdraw_method")
         return
 
+    # Staking amount
     if context.user_data.get("withdraw_method") == "staking_amount":
         context.user_data["stake_amount"] = text
         await update.message.reply_text("Select staking duration:", reply_markup=staking_keyboard)
         return
 
-    # ----- Secret Code Validation -----
+    # Secret Code Validation
     for task, data in TASKS.items():
         if text == data["secret"]:
             if not can_do_task(uid, task):
@@ -260,7 +296,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid = q.from_user.id
 
-    # ----- Tasks -----
+    # Tasks
     if q.data.startswith("task_"):
         task = q.data.replace("task_", "")
         data = TASKS[task]
@@ -269,7 +305,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ----- Withdraw -----
+    # Withdraw
     if q.data == "withdraw_crypto":
         context.user_data["withdraw_method"] = "crypto"
         await q.edit_message_text("Send your Crypto Wallet name and address:")
@@ -285,6 +321,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Enter staking amount:")
         return
 
+    # Staking duration
     if q.data in ["stake_daily", "stake_monthly", "stake_yearly"]:
         duration_map = {"stake_daily": "Daily 1% APY", "stake_monthly": "Monthly 3% APY", "stake_yearly": "Yearly 5% APY"}
         duration = duration_map[q.data]
@@ -303,4 +340,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
 
+    # Render-safe polling
     app.run_polling(drop_pending_updates=True)
