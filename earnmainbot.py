@@ -20,26 +20,16 @@ from telegram.ext import (
 # ================= CONFIG =================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # your Telegram ID
-
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 TASK_REWARD = 0.10
 REF_REWARD = 0.50
 TASK_RESET_TIME = timedelta(hours=24)
 
-# ================= TASK DEFINITIONS =================
-TASKS = {
-    "watch": {"name": "🎥 Watch Video", "url": "https://example.com/video", "secret": "VIDEO123"},
-    "visit": {"name": "🌐 Visit Website", "url": "https://example.com", "secret": "VISIT123"},
-    "airdrop": {"name": "🪂 Claim Airdrop", "url": "https://example.com/airdrop", "secret": "AIRDROP123"},
-}
-
-
 # ================= DATABASE =================
-conn = psycopg.connect(DATABASE_URL)
+conn = psycopg.connect(DATABASE_URL, autocommit=True)
 cur = conn.cursor()
 
-# Users table
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id BIGINT PRIMARY KEY,
@@ -50,7 +40,6 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# Tasks table
 cur.execute("""
 CREATE TABLE IF NOT EXISTS tasks (
     user_id BIGINT,
@@ -60,7 +49,6 @@ CREATE TABLE IF NOT EXISTS tasks (
 )
 """)
 
-# Withdrawals table
 cur.execute("""
 CREATE TABLE IF NOT EXISTS withdrawals (
     user_id BIGINT,
@@ -72,26 +60,30 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 )
 """)
 
-conn.commit()
+# ================= TASKS =================
+TASKS = {
+    "watch": {"name": "🎥 Watch Video", "url": "https://example.com", "secret": "VIDEO123"},
+    "visit": {"name": "🌐 Visit Website", "url": "https://example.com", "secret": "VISIT123"},
+    "airdrop": {"name": "🪂 Claim Airdrop", "url": "https://example.com", "secret": "AIRDROP123"},
+}
 
 # ================= HELPERS =================
 def ref_code(uid):
     return f"REF{uid}"
 
 def add_user(uid, referred_by=None):
-    cur.execute("""
-        INSERT INTO users (user_id, ref_code, referred_by)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (user_id) DO NOTHING
-    """, (uid, ref_code(uid), referred_by))
-    conn.commit()
+    cur.execute(
+        """INSERT INTO users (user_id, ref_code, referred_by)
+           VALUES (%s,%s,%s)
+           ON CONFLICT (user_id) DO NOTHING""",
+        (uid, ref_code(uid), referred_by),
+    )
 
 def add_balance(uid, amount):
     cur.execute(
         "UPDATE users SET balance = balance + %s WHERE user_id=%s",
         (amount, uid),
     )
-    conn.commit()
 
 def balance(uid):
     cur.execute("SELECT balance FROM users WHERE user_id=%s", (uid,))
@@ -104,46 +96,36 @@ def can_do_task(uid, task):
         (uid, task),
     )
     row = cur.fetchone()
-    if not row or not row[0]:
+    if not row:
         return True
     return datetime.utcnow() - row[0] >= TASK_RESET_TIME
 
 def complete_task(uid, task):
-    cur.execute("""
-        INSERT INTO tasks (user_id, task, completed_at)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (user_id, task)
-        DO UPDATE SET completed_at=%s
-    """, (uid, task, datetime.utcnow(), datetime.utcnow()))
+    cur.execute(
+        """INSERT INTO tasks (user_id, task, completed_at)
+           VALUES (%s,%s,%s)
+           ON CONFLICT (user_id, task)
+           DO UPDATE SET completed_at=%s""",
+        (uid, task, datetime.utcnow(), datetime.utcnow()),
+    )
     add_balance(uid, TASK_REWARD)
-    conn.commit()
-
-def referral_info(uid):
-    cur.execute(
-        "SELECT referred_by, referral_paid FROM users WHERE user_id=%s",
-        (uid,),
-    )
-    return cur.fetchone()
-
-def mark_ref_paid(uid):
-    cur.execute(
-        "UPDATE users SET referral_paid=TRUE WHERE user_id=%s",
-        (uid,),
-    )
-    conn.commit()
 
 def get_withdraw_status(uid):
     cur.execute(
-        "SELECT method, amount, status, created_at FROM withdrawals WHERE user_id=%s ORDER BY created_at DESC",
-        (uid,)
+        """SELECT method, amount, status, created_at
+           FROM withdrawals
+           WHERE user_id=%s
+           ORDER BY created_at DESC
+           LIMIT 5""",
+        (uid,),
     )
     rows = cur.fetchall()
     if not rows:
         return "No withdrawals yet."
-    lines = []
-    for r in rows[:5]:  # show last 5 withdrawals
-        lines.append(f"{r[0]} | {r[1]:.2f} USD | {r[2]} | {r[3].strftime('%Y-%m-%d %H:%M')}")
-    return "\n".join(lines)
+    return "\n".join(
+        f"{r[0]} | {float(r[1]):.2f} USD | {r[2]} | {r[3].strftime('%Y-%m-%d %H:%M')}"
+        for r in rows
+    )
 
 # ================= MENUS =================
 menu = ReplyKeyboardMarkup(
@@ -158,23 +140,15 @@ menu = ReplyKeyboardMarkup(
 
 def task_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(TASKS["watch"]["name"], callback_data="task_watch")],
-        [InlineKeyboardButton(TASKS["visit"]["name"], callback_data="task_visit")],
-        [InlineKeyboardButton(TASKS["airdrop"]["name"], callback_data="task_airdrop")],
+        [InlineKeyboardButton(t["name"], callback_data=f"task_{k}")]
+        for k, t in TASKS.items()
     ])
 
 def withdraw_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💎 Crypto Wallet", callback_data="withdraw_crypto")],
         [InlineKeyboardButton("💳 Digital Wallet", callback_data="withdraw_digital")],
-        [InlineKeyboardButton("📈 Staking Wallet", callback_data="withdraw_staking")],
     ])
-
-staking_keyboard = InlineKeyboardMarkup([
-    [InlineKeyboardButton("📅 Daily 1% APY", callback_data="stake_daily")],
-    [InlineKeyboardButton("📅 Monthly 3% APY", callback_data="stake_monthly")],
-    [InlineKeyboardButton("📅 Yearly 5% APY", callback_data="stake_yearly")],
-])
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,50 +156,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     referred_by = context.args[0] if context.args else None
     add_user(uid, referred_by)
     await update.message.reply_text(
-        "👋 Welcome!\n\nComplete tasks, submit secret codes & earn crypto.",
+        "👋 Welcome!\n\nComplete tasks and earn crypto.",
         reply_markup=menu,
     )
 
 # ================= MESSAGE HANDLER =================
 async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
     if not update.message or not update.message.text:
-    return
+        return
 
-text = update.message.text.strip()
+    uid = update.effective_user.id
+    text = update.message.text.strip()
 
-    # Tasks
-    if text in ["💰 Earn Crypto", "📋 Tasks"]:
+    if text in ("💰 Earn Crypto", "📋 Tasks"):
         await update.message.reply_text("Choose a task:", reply_markup=task_keyboard())
         return
 
-    # My Stats
     if text == "📊 My Stats":
-    try:
-        stats_text = (
-            f"📊 *Your Stats*\n\n"
-            f"💰 Balance: {balance(uid):.2f} USD\n"
-            f"🔹 Tasks completed:\n" +
-            "\n".join(
-                [
-                    f"{t['name']}: ✅" if not can_do_task(uid, key)
-                    else f"{t['name']}: ❌"
-                    for key, t in TASKS.items()
-                ]
-            ) +
-            "\n\n💸 Last Withdrawals:\n" +
-            get_withdraw_status(uid)
-        )
+        try:
+            stats = (
+                f"📊 *Your Stats*\n\n"
+                f"💰 Balance: {balance(uid):.2f} USD\n\n"
+                f"🔹 Tasks:\n" +
+                "\n".join(
+                    f"{t['name']}: {'✅' if not can_do_task(uid, k) else '❌'}"
+                    for k, t in TASKS.items()
+                ) +
+                "\n\n💸 Withdrawals:\n" +
+                get_withdraw_status(uid)
+            )
+            await update.message.reply_text(stats, parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text("⚠️ Unable to load stats right now.")
+        return
 
-        await update.message.reply_text(stats_text, parse_mode="Markdown")
-
-    except Exception as e:
-        await update.message.reply_text("⚠️ Unable to load stats right now. Try again.")
-        print("MY STATS ERROR:", e)
-
-    return
-
-    # Referral
     if text == "👥 Refer & Earn":
         await update.message.reply_text(
             f"Earn {REF_REWARD} USD per referral\n\n"
@@ -233,116 +197,35 @@ text = update.message.text.strip()
         )
         return
 
-    # Proof Payment
-    if text == "🧾 Proof Payment":
-        await update.message.reply_text("https://t.me/your_proof_channel")
-        return
-
-    # Help
-    if text == "❓ Help":
-        await update.message.reply_text("Admin: @YourAdminUsername")
-        return
-
-    # Withdraw
     if text == "💸 Withdraw":
-        await update.message.reply_text("Select withdrawal method:", reply_markup=withdraw_keyboard())
+        await update.message.reply_text("Select method:", reply_markup=withdraw_keyboard())
         return
 
-    # Withdraw data collection
-    if context.user_data.get("withdraw_method") in ["crypto", "digital"]:
-        info_type = "Crypto Wallet" if context.user_data.get("withdraw_method") == "crypto" else "Digital Wallet"
-        context.user_data["withdraw_info"] = text
-        # save withdrawal
-        cur.execute(
-            "INSERT INTO withdrawals (user_id, method, info, amount) VALUES (%s,%s,%s,%s)",
-            (uid, info_type, text, balance(uid))
-        )
-        conn.commit()
-        await update.message.reply_text(f"✅ {info_type} info received.\nAdmin will process it.")
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"{info_type} Withdrawal Request:\nUser: {uid}\n{text}")
-        context.user_data.pop("withdraw_method")
-        return
-
-    # Staking amount
-    if context.user_data.get("withdraw_method") == "staking_amount":
-        context.user_data["stake_amount"] = text
-        await update.message.reply_text("Select staking duration:", reply_markup=staking_keyboard)
-        return
-
-    # Secret Code Validation
+    # Secret codes
     for task, data in TASKS.items():
         if text == data["secret"]:
             if not can_do_task(uid, task):
-                await update.message.reply_text("⏳ Task already done. Try again after 24h.")
+                await update.message.reply_text("⏳ Task already completed. Try later.")
                 return
-
             complete_task(uid, task)
-            ref = referral_info(uid)
-            if ref:
-                referred_by, paid = ref
-                if referred_by and not paid:
-                    cur.execute("SELECT user_id FROM users WHERE ref_code=%s", (referred_by,))
-                    r = cur.fetchone()
-                    if r:
-                        add_balance(r[0], REF_REWARD)
-                        mark_ref_paid(uid)
-            await update.message.reply_text(f"🎉 Task Completed!\n✅ +{TASK_REWARD} USD\n🔒 Reset after 24h")
+            await update.message.reply_text(f"✅ Task completed! +{TASK_REWARD} USD")
             return
 
-    if len(text) <= 20 and text not in [
-    "💰 Earn Crypto",
-    "📋 Tasks",
-    "📊 My Stats",
-    "👥 Refer & Earn",
-    "💸 Withdraw",
-    "🧾 Proof Payment",
-    "❓ Help",
-]:
-    await update.message.reply_text("❌ Invalid secret code.")
-
-
-
-# ================= CALLBACK HANDLER =================
+# ================= CALLBACK =================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    uid = q.from_user.id
 
-    # Tasks
     if q.data.startswith("task_"):
         task = q.data.replace("task_", "")
         data = TASKS[task]
         await q.edit_message_text(
-            f"{data['name']} 👇\n\n🔗 {data['url']}\n\nSend the secret code to claim reward."
+            f"{data['name']}\n\n🔗 {data['url']}\n\nSend the secret code."
         )
-        return
 
-    # Withdraw
-    if q.data == "withdraw_crypto":
-        context.user_data["withdraw_method"] = "crypto"
-        await q.edit_message_text("Send your Crypto Wallet name and address:")
-        return
-
-    if q.data == "withdraw_digital":
-        context.user_data["withdraw_method"] = "digital"
-        await q.edit_message_text("Send your Digital Wallet name and number:")
-        return
-
-    if q.data == "withdraw_staking":
-        context.user_data["withdraw_method"] = "staking_amount"
-        await q.edit_message_text("Enter staking amount:")
-        return
-
-    # Staking duration
-    if q.data in ["stake_daily", "stake_monthly", "stake_yearly"]:
-        duration_map = {"stake_daily": "Daily 1% APY", "stake_monthly": "Monthly 3% APY", "stake_yearly": "Yearly 5% APY"}
-        duration = duration_map[q.data]
-        amount = context.user_data.get("stake_amount", "Not provided")
-        await q.edit_message_text(f"📈 Staking request:\nUser: {uid}\nAmount: {amount}\nDuration: {duration}")
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"Staking request:\nUser: {uid}\nAmount: {amount}\nDuration: {duration}")
-        context.user_data.pop("withdraw_method", None)
-        context.user_data.pop("stake_amount", None)
-        return
+# ================= ERROR HANDLER (FIX) =================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    print("ERROR:", context.error)
 
 # ================= RUN =================
 if __name__ == "__main__":
@@ -351,6 +234,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
+    app.add_error_handler(error_handler)
 
-    # Render-safe polling
     app.run_polling(drop_pending_updates=True)
