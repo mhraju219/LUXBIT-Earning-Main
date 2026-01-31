@@ -1,9 +1,7 @@
 import os
-import threading
 from datetime import datetime, timedelta
 
 import psycopg
-from flask import Flask
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -22,8 +20,8 @@ from telegram.ext import (
 # ================= CONFIG =================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "ADMIN_ID"))  # your Telegram ID
-PORT = int(os.environ.get("PORT", 10000))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # your Telegram ID
+
 
 TASK_REWARD = 0.10
 REF_REWARD = 0.50
@@ -36,17 +34,6 @@ TASKS = {
     "airdrop": {"name": "🪂 Claim Airdrop", "url": "https://example.com/airdrop", "secret": "AIRDROP123"},
 }
 
-# ================= FLASK (PORT FIX) =================
-app_flask = Flask(__name__)
-
-@app_flask.route("/")
-def home():
-    return "Bot running"
-
-threading.Thread(
-    target=lambda: app_flask.run(host="0.0.0.0", port=PORT),
-    daemon=True,
-).start()
 
 # ================= DATABASE =================
 conn = psycopg.connect(DATABASE_URL)
