@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timedelta
 
 import psycopg
+from psycopg_pool import ConnectionPool
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -26,39 +27,46 @@ TASK_REWARD = 0.10
 REF_REWARD = 0.50
 TASK_RESET_TIME = timedelta(hours=24)
 
-# ================= DATABASE =================
-conn = psycopg.connect(DATABASE_URL, autocommit=True)
-cur = conn.cursor()
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id BIGINT PRIMARY KEY,
-    balance NUMERIC DEFAULT 0,
-    ref_code TEXT UNIQUE,
-    referred_by TEXT,
-    referral_paid BOOLEAN DEFAULT FALSE
+# ================= DB POOL (FIX) =================
+db_pool = ConnectionPool(
+    DATABASE_URL,
+    min_size=1,
+    max_size=5,
+    timeout=30,
 )
-""")
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS tasks (
-    user_id BIGINT,
-    task TEXT,
-    completed_at TIMESTAMP,
-    UNIQUE(user_id, task)
-)
-""")
+def init_db():
+    with db_pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                balance NUMERIC DEFAULT 0,
+                ref_code TEXT UNIQUE,
+                referred_by TEXT,
+                referral_paid BOOLEAN DEFAULT FALSE
+            )
+            """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                user_id BIGINT,
+                task TEXT,
+                completed_at TIMESTAMP,
+                UNIQUE(user_id, task)
+            )
+            """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                user_id BIGINT,
+                method TEXT,
+                info TEXT,
+                amount NUMERIC DEFAULT 0,
+                status TEXT DEFAULT 'Pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS withdrawals (
-    user_id BIGINT,
-    method TEXT,
-    info TEXT,
-    amount NUMERIC DEFAULT 0,
-    status TEXT DEFAULT 'Pending',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-""")
+init_db()
 
 # ================= TASKS =================
 TASKS = {
@@ -67,12 +75,25 @@ TASKS = {
     "airdrop": {"name": "🪂 Claim Airdrop", "url": "https://example.com", "secret": "AIRDROP123"},
 }
 
-# ================= HELPERS =================
+# ================= HELPERS (SAFE) =================
+def db_exec(query, params=None, fetchone=False, fetchall=False):
+    try:
+        with db_pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params or ())
+                if fetchone:
+                    return cur.fetchone()
+                if fetchall:
+                    return cur.fetchall()
+    except Exception as e:
+        print("DB ERROR:", e)
+        return None
+
 def ref_code(uid):
     return f"REF{uid}"
 
 def add_user(uid, referred_by=None):
-    cur.execute(
+    db_exec(
         """INSERT INTO users (user_id, ref_code, referred_by)
            VALUES (%s,%s,%s)
            ON CONFLICT (user_id) DO NOTHING""",
@@ -80,28 +101,31 @@ def add_user(uid, referred_by=None):
     )
 
 def add_balance(uid, amount):
-    cur.execute(
+    db_exec(
         "UPDATE users SET balance = balance + %s WHERE user_id=%s",
         (amount, uid),
     )
 
 def balance(uid):
-    cur.execute("SELECT balance FROM users WHERE user_id=%s", (uid,))
-    row = cur.fetchone()
+    row = db_exec(
+        "SELECT balance FROM users WHERE user_id=%s",
+        (uid,),
+        fetchone=True,
+    )
     return float(row[0]) if row else 0.0
 
 def can_do_task(uid, task):
-    cur.execute(
+    row = db_exec(
         "SELECT completed_at FROM tasks WHERE user_id=%s AND task=%s",
         (uid, task),
+        fetchone=True,
     )
-    row = cur.fetchone()
     if not row:
         return True
     return datetime.utcnow() - row[0] >= TASK_RESET_TIME
 
 def complete_task(uid, task):
-    cur.execute(
+    db_exec(
         """INSERT INTO tasks (user_id, task, completed_at)
            VALUES (%s,%s,%s)
            ON CONFLICT (user_id, task)
@@ -111,15 +135,15 @@ def complete_task(uid, task):
     add_balance(uid, TASK_REWARD)
 
 def get_withdraw_status(uid):
-    cur.execute(
+    rows = db_exec(
         """SELECT method, amount, status, created_at
            FROM withdrawals
            WHERE user_id=%s
            ORDER BY created_at DESC
            LIMIT 5""",
         (uid,),
+        fetchall=True,
     )
-    rows = cur.fetchall()
     if not rows:
         return "No withdrawals yet."
     return "\n".join(
@@ -142,12 +166,6 @@ def task_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(t["name"], callback_data=f"task_{k}")]
         for k, t in TASKS.items()
-    ])
-
-def withdraw_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 Crypto Wallet", callback_data="withdraw_crypto")],
-        [InlineKeyboardButton("💳 Digital Wallet", callback_data="withdraw_digital")],
     ])
 
 # ================= START =================
@@ -173,43 +191,19 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "📊 My Stats":
-        try:
-            stats = (
-                f"📊 *Your Stats*\n\n"
-                f"💰 Balance: {balance(uid):.2f} USD\n\n"
-                f"🔹 Tasks:\n" +
-                "\n".join(
-                    f"{t['name']}: {'✅' if not can_do_task(uid, k) else '❌'}"
-                    for k, t in TASKS.items()
-                ) +
-                "\n\n💸 Withdrawals:\n" +
-                get_withdraw_status(uid)
-            )
-            await update.message.reply_text(stats, parse_mode="Markdown")
-        except Exception:
-            await update.message.reply_text("⚠️ Unable to load stats right now.")
-        return
-
-    if text == "👥 Refer & Earn":
-        await update.message.reply_text(
-            f"Earn {REF_REWARD} USD per referral\n\n"
-            f"https://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}"
+        stats = (
+            f"📊 *Your Stats*\n\n"
+            f"💰 Balance: {balance(uid):.2f} USD\n\n"
+            f"🔹 Tasks:\n" +
+            "\n".join(
+                f"{t['name']}: {'✅' if not can_do_task(uid, k) else '❌'}"
+                for k, t in TASKS.items()
+            ) +
+            "\n\n💸 Withdrawals:\n" +
+            get_withdraw_status(uid)
         )
+        await update.message.reply_text(stats, parse_mode="Markdown")
         return
-
-    if text == "💸 Withdraw":
-        await update.message.reply_text("Select method:", reply_markup=withdraw_keyboard())
-        return
-
-    # Secret codes
-    for task, data in TASKS.items():
-        if text == data["secret"]:
-            if not can_do_task(uid, task):
-                await update.message.reply_text("⏳ Task already completed. Try later.")
-                return
-            complete_task(uid, task)
-            await update.message.reply_text(f"✅ Task completed! +{TASK_REWARD} USD")
-            return
 
 # ================= CALLBACK =================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,9 +217,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{data['name']}\n\n🔗 {data['url']}\n\nSend the secret code."
         )
 
-# ================= ERROR HANDLER (FIX) =================
+# ================= ERROR HANDLER =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print("ERROR:", context.error)
+    print("BOT ERROR:", context.error)
 
 # ================= RUN =================
 if __name__ == "__main__":
