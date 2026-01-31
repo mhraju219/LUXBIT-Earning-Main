@@ -1,7 +1,6 @@
 import os
 from datetime import datetime, timedelta
 
-import psycopg
 from psycopg_pool import ConnectionPool
 from telegram import (
     Update,
@@ -27,55 +26,9 @@ TASK_REWARD = 0.10
 REF_REWARD = 0.50
 TASK_RESET_TIME = timedelta(hours=24)
 
-# ================= DB POOL (FIX) =================
-db_pool = ConnectionPool(
-    DATABASE_URL,
-    min_size=1,
-    max_size=5,
-    timeout=30,
-)
+# ================= DATABASE POOL =================
+db_pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=5)
 
-def init_db():
-    with db_pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                balance NUMERIC DEFAULT 0,
-                ref_code TEXT UNIQUE,
-                referred_by TEXT,
-                referral_paid BOOLEAN DEFAULT FALSE
-            )
-            """)
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                user_id BIGINT,
-                task TEXT,
-                completed_at TIMESTAMP,
-                UNIQUE(user_id, task)
-            )
-            """)
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS withdrawals (
-                user_id BIGINT,
-                method TEXT,
-                info TEXT,
-                amount NUMERIC DEFAULT 0,
-                status TEXT DEFAULT 'Pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """)
-
-init_db()
-
-# ================= TASKS =================
-TASKS = {
-    "watch": {"name": "🎥 Watch Video", "url": "https://example.com", "secret": "VIDEO123"},
-    "visit": {"name": "🌐 Visit Website", "url": "https://example.com", "secret": "VISIT123"},
-    "airdrop": {"name": "🪂 Claim Airdrop", "url": "https://example.com", "secret": "AIRDROP123"},
-}
-
-# ================= HELPERS (SAFE) =================
 def db_exec(query, params=None, fetchone=False, fetchall=False):
     try:
         with db_pool.connection() as conn:
@@ -89,6 +42,58 @@ def db_exec(query, params=None, fetchone=False, fetchall=False):
         print("DB ERROR:", e)
         return None
 
+# ================= INIT DB =================
+def init_db():
+    db_exec("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id BIGINT PRIMARY KEY,
+        balance NUMERIC DEFAULT 0,
+        ref_code TEXT UNIQUE,
+        referred_by TEXT,
+        referral_paid BOOLEAN DEFAULT FALSE
+    )
+    """)
+    db_exec("""
+    CREATE TABLE IF NOT EXISTS tasks (
+        user_id BIGINT,
+        task TEXT,
+        completed_at TIMESTAMP,
+        UNIQUE(user_id, task)
+    )
+    """)
+    db_exec("""
+    CREATE TABLE IF NOT EXISTS withdrawals (
+        user_id BIGINT,
+        method TEXT,
+        info TEXT,
+        amount NUMERIC,
+        status TEXT DEFAULT 'Pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+init_db()
+
+# ================= TASKS =================
+TASKS = {
+    "watch": {
+        "name": "🎥 Watch Video",
+        "url": "https://example.com/video",
+        "secret": "VIDEO123",
+    },
+    "visit": {
+        "name": "🌐 Visit Website",
+        "url": "https://example.com",
+        "secret": "VISIT123",
+    },
+    "airdrop": {
+        "name": "🪂 Claim Airdrop",
+        "url": "https://example.com/airdrop",
+        "secret": "AIRDROP123",
+    },
+}
+
+# ================= HELPERS =================
 def ref_code(uid):
     return f"REF{uid}"
 
@@ -168,13 +173,20 @@ def task_keyboard():
         for k, t in TASKS.items()
     ])
 
+def withdraw_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💎 Crypto Wallet", callback_data="withdraw_crypto")],
+        [InlineKeyboardButton("💳 Digital Wallet", callback_data="withdraw_digital")],
+    ])
+
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     referred_by = context.args[0] if context.args else None
     add_user(uid, referred_by)
+
     await update.message.reply_text(
-        "👋 Welcome!\n\nComplete tasks and earn crypto.",
+        "👋 Welcome!\n\nComplete tasks, earn rewards & withdraw crypto.",
         reply_markup=menu,
     )
 
@@ -186,26 +198,67 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
 
+    # ---- MENU BUTTONS ----
     if text in ("💰 Earn Crypto", "📋 Tasks"):
         await update.message.reply_text("Choose a task:", reply_markup=task_keyboard())
         return
 
     if text == "📊 My Stats":
-        stats = (
-            f"📊 *Your Stats*\n\n"
-            f"💰 Balance: {balance(uid):.2f} USD\n\n"
-            f"🔹 Tasks:\n" +
-            "\n".join(
-                f"{t['name']}: {'✅' if not can_do_task(uid, k) else '❌'}"
-                for k, t in TASKS.items()
-            ) +
-            "\n\n💸 Withdrawals:\n" +
-            get_withdraw_status(uid)
-        )
-        await update.message.reply_text(stats, parse_mode="Markdown")
+        try:
+            stats = (
+                f"📊 *Your Stats*\n\n"
+                f"💰 Balance: {balance(uid):.2f} USD\n\n"
+                f"🔹 Tasks:\n" +
+                "\n".join(
+                    f"{t['name']}: {'✅' if not can_do_task(uid, k) else '❌'}"
+                    for k, t in TASKS.items()
+                ) +
+                "\n\n💸 Withdrawals:\n" +
+                get_withdraw_status(uid)
+            )
+            await update.message.reply_text(stats, parse_mode="Markdown")
+        except Exception as e:
+            print("STATS ERROR:", e)
+            await update.message.reply_text("⚠️ Unable to load stats.")
         return
 
-# ================= CALLBACK =================
+    if text == "👥 Refer & Earn":
+        await update.message.reply_text(
+            f"Earn {REF_REWARD} USD per referral\n\n"
+            f"https://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}"
+        )
+        return
+
+    if text == "💸 Withdraw":
+        await update.message.reply_text("Select withdrawal method:", reply_markup=withdraw_keyboard())
+        return
+
+    if text == "🧾 Proof Payment":
+        await update.message.reply_text("https://t.me/your_proof_channel")
+        return
+
+    if text == "❓ Help":
+        await update.message.reply_text("Admin support: @YourAdminUsername")
+        return
+
+    # ---- SECRET CODES ----
+    for task_key, task in TASKS.items():
+        if text == task["secret"]:
+            if not can_do_task(uid, task_key):
+                await update.message.reply_text("⏳ Task already completed. Try again later.")
+                return
+
+            complete_task(uid, task_key)
+            await update.message.reply_text(
+                f"🎉 Task Completed!\n"
+                f"✅ +{TASK_REWARD} USD added to your balance."
+            )
+            return
+
+    # ---- FALLBACK ----
+    await update.message.reply_text("❌ Invalid option or secret code.")
+
+# ================= CALLBACK HANDLER =================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -214,8 +267,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task = q.data.replace("task_", "")
         data = TASKS[task]
         await q.edit_message_text(
-            f"{data['name']}\n\n🔗 {data['url']}\n\nSend the secret code."
+            f"{data['name']}\n\n🔗 {data['url']}\n\nSend the secret code to claim reward."
         )
+
+    elif q.data == "withdraw_crypto":
+        await q.edit_message_text("Send your crypto wallet address:")
+        context.user_data["withdraw_method"] = "Crypto"
+
+    elif q.data == "withdraw_digital":
+        await q.edit_message_text("Send your digital wallet info:")
+        context.user_data["withdraw_method"] = "Digital"
 
 # ================= ERROR HANDLER =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
