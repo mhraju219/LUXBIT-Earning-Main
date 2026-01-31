@@ -202,7 +202,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= MESSAGE HANDLER =================
 async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    text = update.message.text.strip()
+    if not update.message or not update.message.text:
+    return
+
+text = update.message.text.strip()
 
     # Tasks
     if text in ["💰 Earn Crypto", "📋 Tasks"]:
@@ -211,17 +214,29 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # My Stats
     if text == "📊 My Stats":
-        await update.message.reply_text(
-            f"📊 **Your Stats**\n\n"
+    try:
+        stats_text = (
+            f"📊 *Your Stats*\n\n"
             f"💰 Balance: {balance(uid):.2f} USD\n"
             f"🔹 Tasks completed:\n" +
             "\n".join(
-                [f"{t['name']}: ✅" if not can_do_task(uid, key) else f"{t['name']}: ❌" for key, t in TASKS.items()]
+                [
+                    f"{t['name']}: ✅" if not can_do_task(uid, key)
+                    else f"{t['name']}: ❌"
+                    for key, t in TASKS.items()
+                ]
             ) +
-            "\n\n💸 Last Withdrawals:\n" + get_withdraw_status(uid),
-            parse_mode="Markdown"
+            "\n\n💸 Last Withdrawals:\n" +
+            get_withdraw_status(uid)
         )
-        return
+
+        await update.message.reply_text(stats_text, parse_mode="Markdown")
+
+    except Exception as e:
+        await update.message.reply_text("⚠️ Unable to load stats right now. Try again.")
+        print("MY STATS ERROR:", e)
+
+    return
 
     # Referral
     if text == "👥 Refer & Earn":
@@ -287,8 +302,18 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🎉 Task Completed!\n✅ +{TASK_REWARD} USD\n🔒 Reset after 24h")
             return
 
-    if len(text) <= 20:
-        await update.message.reply_text("❌ Invalid secret code.")
+    if len(text) <= 20 and text not in [
+    "💰 Earn Crypto",
+    "📋 Tasks",
+    "📊 My Stats",
+    "👥 Refer & Earn",
+    "💸 Withdraw",
+    "🧾 Proof Payment",
+    "❓ Help",
+]:
+    await update.message.reply_text("❌ Invalid secret code.")
+
+
 
 # ================= CALLBACK HANDLER =================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
