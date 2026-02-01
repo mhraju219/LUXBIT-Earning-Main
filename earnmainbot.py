@@ -1,5 +1,5 @@
 import os
-import psycopg2
+import psycopg
 from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import (
@@ -31,7 +31,7 @@ REF_REWARD = 0.50
 RESET_TIME = timedelta(hours=24)
 
 # ================= DATABASE =================
-conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+conn = psycopg.connect(DATABASE_URL, sslmode="require")
 conn.autocommit = True
 cur = conn.cursor()
 
