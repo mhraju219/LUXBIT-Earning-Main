@@ -1,8 +1,7 @@
 import os
 import psycopg2
 from datetime import datetime, timedelta
-from flask import Flask, request, abort
-
+from flask import Flask, request
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -11,7 +10,6 @@ from telegram import (
 )
 from telegram.ext import (
     Application,
-    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
@@ -19,18 +17,17 @@ from telegram.ext import (
     filters,
 )
 
-# ================= CONFIG =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_CHANNEL = os.getenv("ADMIN_CHANNEL")
-PROOF_CHANNEL = os.getenv("PROOF_CHANNEL")
-HOT_TOKEN_URL = os.getenv("HOT_TOKEN_URL")
-
-PORT = int(os.getenv("PORT", 10000))
+# ================= ENV =================
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+DATABASE_URL = os.environ["DATABASE_URL"]
+RENDER_URL = os.environ["RENDER_URL"]  # https://your-app.onrender.com
+ADMIN_CHANNEL = os.environ["ADMIN_CHANNEL"]  # @adminchannel
+PROOF_CHANNEL = os.environ["PROOF_CHANNEL"]  # @proofchannel
+HOT_TOKEN_URL = os.environ["HOT_TOKEN_URL"]
+PORT = int(os.environ.get("PORT", 10000))
 
 TASK_REWARD = 0.10
 REF_REWARD = 0.50
-MIN_WITHDRAW = 1.00
 RESET_TIME = timedelta(hours=24)
 
 # ================= DATABASE =================
@@ -63,7 +60,6 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     method TEXT,
     info TEXT,
     amount NUMERIC,
-    status TEXT DEFAULT 'Pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
@@ -82,7 +78,7 @@ TASKS = {
     },
     "airdrop": {
         "name": "🪂 Claim Airdrop",
-        "url": "https://example.com/airdrop",
+        "url": "https://example.com",
         "secret": "AIRDROP123",
     },
 }
@@ -107,15 +103,6 @@ WITHDRAW_KEYBOARD = InlineKeyboardMarkup(
     [
         [InlineKeyboardButton("💎 Crypto Wallet", callback_data="wd_crypto")],
         [InlineKeyboardButton("💳 Digital Wallet", callback_data="wd_digital")],
-        [InlineKeyboardButton("📈 Staking", callback_data="wd_staking")],
-    ]
-)
-
-STAKING_KEYBOARD = InlineKeyboardMarkup(
-    [
-        [InlineKeyboardButton("📅 Daily APY 3%", callback_data="stake_daily")],
-        [InlineKeyboardButton("📅 Monthly APY 5%", callback_data="stake_monthly")],
-        [InlineKeyboardButton("📅 Yearly APY 7%", callback_data="stake_yearly")],
     ]
 )
 
@@ -125,11 +112,7 @@ def ref_code(uid):
 
 def add_user(uid, referred_by=None):
     cur.execute(
-        """
-        INSERT INTO users (user_id, ref_code, referred_by)
-        VALUES (%s,%s,%s)
-        ON CONFLICT DO NOTHING
-        """,
+        "INSERT INTO users (user_id, ref_code, referred_by) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
         (uid, ref_code(uid), referred_by),
     )
 
@@ -139,10 +122,7 @@ def get_balance(uid):
     return float(r[0]) if r else 0.0
 
 def add_balance(uid, amount):
-    cur.execute(
-        "UPDATE users SET balance = balance + %s WHERE user_id=%s",
-        (amount, uid),
-    )
+    cur.execute("UPDATE users SET balance = balance + %s WHERE user_id=%s", (amount, uid))
 
 def can_do_task(uid, key):
     cur.execute(
@@ -170,7 +150,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     referred_by = context.args[0] if context.args else None
     add_user(uid, referred_by)
     await update.message.reply_text(
-        "👋 Welcome!\nComplete tasks & earn crypto.",
+        "👋 Welcome!\nComplete tasks & earn crypto 💰",
         reply_markup=MAIN_MENU,
     )
 
@@ -180,49 +160,47 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "🔥 Hot Token":
         await update.message.reply_text(
-            "🔥 Hot Token Live!",
+            "🔥 Hot Token",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🚀 Open Hot Token", url=HOT_TOKEN_URL)]]
+                [[InlineKeyboardButton("🚀 Open", url=HOT_TOKEN_URL)]]
             ),
         )
         return
 
     if text == "📋 Task":
-        await update.message.reply_text(
-            "📋 Choose a task:", reply_markup=TASK_KEYBOARD
-        )
+        await update.message.reply_text("📋 Choose a task:", reply_markup=TASK_KEYBOARD)
         return
 
     if text == "📊 My Stats":
         cur.execute("SELECT COUNT(*) FROM tasks WHERE user_id=%s", (uid,))
-        total_tasks = cur.fetchone()[0]
+        task_count = cur.fetchone()[0]
         await update.message.reply_text(
-            f"📊 *My Stats*\n\n"
+            f"📊 My Stats\n\n"
             f"💰 Balance: {get_balance(uid):.2f} USD\n"
-            f"✅ Tasks Completed: {total_tasks}\n"
-            f"👥 Referral ID: `{ref_code(uid)}`",
-            parse_mode="Markdown",
+            f"✅ Tasks Completed: {task_count}\n"
+            f"👥 Referral ID: {ref_code(uid)}"
         )
         return
 
     if text == "💸 Withdraw":
         await update.message.reply_text(
-            "💸 Select withdraw method:", reply_markup=WITHDRAW_KEYBOARD
+            "💸 Choose withdraw method:",
+            reply_markup=WITHDRAW_KEYBOARD,
         )
         return
 
     if text == "👥 Refer & Earn":
         await update.message.reply_text(
-            f"👥 Invite friends & earn!\n\n"
+            f"👥 Invite & Earn\n\n"
             f"https://t.me/YOUR_BOT_USERNAME?start={ref_code(uid)}"
         )
         return
 
     if text == "🧾 Proof Payment":
         await update.message.reply_text(
-            "🧾 Payment Proof Channel",
+            "🧾 Payment Proof",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📢 Open Channel", url=f"https://t.me/{PROOF_CHANNEL.lstrip('@')}")]]
+                [[InlineKeyboardButton("📢 Channel", url=f"https://t.me/{PROOF_CHANNEL.lstrip('@')}")]]
             ),
         )
         return
@@ -231,58 +209,55 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❓ Support",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("👮 Admin Channel", url=f"https://t.me/{ADMIN_CHANNEL.lstrip('@')}")]]
+                [[InlineKeyboardButton("👮 Admin", url=f"https://t.me/{ADMIN_CHANNEL.lstrip('@')}")]]
             ),
         )
         return
 
-    # Secret Code
-    for k, t in TASKS.items():
-        if text == t["secret"]:
-            if not can_do_task(uid, k):
+    # Secret code
+    for key, task in TASKS.items():
+        if text == task["secret"]:
+            if not can_do_task(uid, key):
                 await update.message.reply_text("⏳ Task already completed.")
                 return
-            complete_task(uid, k)
+            complete_task(uid, key)
             await update.message.reply_text(
-                f"🎉 Task completed!\n+{TASK_REWARD} USD added."
+                f"🎉 Task Completed!\n+{TASK_REWARD} USD added"
             )
             return
 
-    await update.message.reply_text("❌ Invalid option or code.")
+    await update.message.reply_text("❌ Invalid input.")
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    uid = q.from_user.id
+    key = q.data.replace("task_", "")
+    task = TASKS[key]
+    await q.edit_message_text(
+        f"{task['name']}\n\n🔗 {task['url']}\nSend secret code to complete."
+    )
 
-    if q.data.startswith("task_"):
-        key = q.data.replace("task_", "")
-        t = TASKS[key]
-        await q.edit_message_text(
-            f"{t['name']}\n\n🔗 {t['url']}\n\n"
-            "Send secret code to complete."
-        )
+async def error_handler(update, context):
+    print("ERROR:", context.error)
 
-# ================= APP & WEBHOOK =================
-application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(callbacks))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
-
+# ================= FLASK + WEBHOOK =================
 flask_app = Flask(__name__)
+application = Application.builder().token(BOT_TOKEN).build()
+
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
+application.add_handler(CallbackQueryHandler(callbacks))
+application.add_error_handler(error_handler)
 
 @flask_app.route("/", methods=["GET"])
 def home():
-    return "Bot is running"
+    return "Bot running"
 
 @flask_app.route("/webhook", methods=["POST"])
 async def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
+    update = Update.de_json(request.get_json(force=True), application.bot)
     await application.process_update(update)
     return "OK"
 
-if __name__ == "__main__":
-    webhook_url = f"https://YOUR_RENDER_URL.onrender.com/webhook"
-    application.bot.set_webhook(webhook_url)
-    flask_app.run(host="0.0.0.0", port=PORT)
+# Webhook set once on start
+application.bot.set_webhook(f"{RENDER_URL}/webhook")
